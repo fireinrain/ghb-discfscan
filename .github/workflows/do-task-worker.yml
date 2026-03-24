@@ -1,10 +1,5 @@
 name: Do Task Worker
 
-# 最多20个并行工作流
-# 每个工作流最多20个作业
-# 每个作业最多运行6小时
-# 每个工作流最多运行72小时
-
 on:
   workflow_dispatch:
     inputs:
@@ -28,6 +23,9 @@ on:
         required: true
         default: "false"
 
+  push:
+    branches:
+      - main
 
 jobs:
   worker:
@@ -41,12 +39,12 @@ jobs:
       - uses: actions/checkout@v3
 
       - uses: actions/setup-go@v4
-      - name: run worker
-        run: |
-         go run main.go \
-         --task_type "${{ github.event.inputs.task_type }}" \
-         --target "${{ github.event.inputs.target }}" \
-         --port "${{ github.event.inputs.port }}" \
-         --speedtest "${{ github.event.inputs.speedtest }}" \
-         --worker "${{ matrix.worker_id }}"
 
+      - name: Run Worker
+        run: |
+          go run main.go \
+            --task_type "${{ github.event.inputs.task_type }}" \
+            --target "${{ github.event.inputs.target }}" \
+            --port "${{ github.event.inputs.port }}" \
+            --speedtest "${{ github.event.inputs.speedtest }}" \
+            --worker "${{ matrix.worker_id }}"
