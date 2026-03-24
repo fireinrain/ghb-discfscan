@@ -37,7 +37,7 @@ func main() {
 	workerID := flag.String("worker", "0", "worker_id")
 	taskType := flag.String("task_type", "", "task_type")
 	target := flag.String("target", "", "target")
-	port := flag.Int("port", 443, "port")
+	port := flag.String("port", "443", "port")
 	speedTest := flag.Bool("speedtest", false, "speedtest")
 
 	flag.Parse()
