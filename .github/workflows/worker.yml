@@ -1,0 +1,52 @@
+name: Do Task Worker
+
+# 最多20个并行工作流
+# 每个工作流最多20个作业
+# 每个作业最多运行6小时
+# 每个工作流最多运行72小时
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: "worker列表"
+        required: false
+        default: "[1,2,3,4,5,6,7,8,9,10]"
+      task_type:
+        description: "任务类型"
+        required: true
+        default: "scan"
+      target:
+        description: "目标|CIDR|CIDRS|IP|IPS"
+        required: true
+      port:
+        description: "目标端口|80|80,443|80-1000"
+        required: true
+        default: "443,2053,2083,2087,2096,8443"
+      speedtest:
+        description: "是否进行测速"
+        required: true
+        default: "false"
+
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        worker_id: ${{ fromJson(github.event.inputs.workers) }}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-go@v4
+      - name: run worker
+        run: |
+         go run main.go \
+         --task_type "${{ github.event.inputs.task_type }}" \
+         --target "${{ github.event.inputs.target }}" \
+         --port "${{ github.event.inputs.port }}" \
+         --speedtest "${{ github.event.inputs.speedtest }}" \
+         --worker "${{ matrix.worker_id }}"
+
