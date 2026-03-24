@@ -40,14 +40,24 @@ jobs:
 
       - uses: actions/setup-go@v4
 
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
       - name: Init Go Modules
         run: |
             go mod tidy && go mod download
       - name: Run Worker
         run: |
           go run main.go \
-            --task_type "${{ github.event.inputs.task_type }}" \
-            --target "${{ github.event.inputs.target }}" \
-            --port "${{ github.event.inputs.port }}" \
-            --speedtest "${{ github.event.inputs.speedtest }}" \
-            --worker "${{ matrix.worker_id }}"
+            --task_type=${{ github.event.inputs.task_type }} \
+            --target=${{ github.event.inputs.target }} \
+            --port=${{ github.event.inputs.port }} \
+            --speedtest=${{ github.event.inputs.speedtest }} \
+            --worker=${{ matrix.worker_id }}
