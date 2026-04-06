@@ -1,94 +1,157 @@
 package tgbot
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"os"
-	"strings"
+	"log"
+	"sync"
+	"time"
 
-	"github.com/redis/go-redis/v9"
+	tele "gopkg.in/telebot.v3"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"discfscan-server/pkg"
 )
 
-var ctx = context.Background()
+type TGBotManager struct {
+	mu         sync.Mutex
+	bot        *tele.Bot
+	store      *pkg.Store
+	dispatcher *pkg.GitHubDispatcher
+}
 
-var rdb = redis.NewClient(&redis.Options{
-	Addr: os.Getenv("REDIS_ADDR"),
-})
+func NewTGBotManager(store *pkg.Store, dispatcher *pkg.GitHubDispatcher) *TGBotManager {
+	return &TGBotManager{
+		store:      store,
+		dispatcher: dispatcher,
+	}
+}
 
-func RunTgBotServer() {
-	bot, _ := tgbotapi.NewBotAPI(os.Getenv("TG_TOKEN"))
+func (m *TGBotManager) Start(token string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
+	// Stop existing bot if running
+	if m.bot != nil {
+		m.bot.Stop()
+	}
 
-	updates := bot.GetUpdatesChan(u)
+	if token == "" {
+		return fmt.Errorf("empty token provided")
+	}
 
-	for update := range updates {
-		if update.Message == nil {
-			continue
+	pref := tele.Settings{
+		Token:  token,
+		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
+	}
+
+	b, err := tele.NewBot(pref)
+	if err != nil {
+		return err
+	}
+
+	m.bot = b
+	m.registerRoutes()
+
+	go func() {
+		log.Println("Telegram bot is starting...")
+		b.Start()
+	}()
+
+	return nil
+}
+
+func (m *TGBotManager) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.bot != nil {
+		m.bot.Stop()
+		m.bot = nil
+	}
+	log.Println("Telegram bot stopped.")
+}
+
+func (m *TGBotManager) IsRunning() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bot != nil
+}
+
+func (m *TGBotManager) SendTestMessage(chatID int64, text string) error {
+	m.mu.Lock()
+	b := m.bot
+	m.mu.Unlock()
+
+	if b == nil {
+		return fmt.Errorf("bot is not running")
+	}
+
+	chat := &tele.Chat{ID: chatID}
+	_, err := b.Send(chat, text)
+	return err
+}
+
+func (m *TGBotManager) registerRoutes() {
+	// Global Middleware: Apply Access Control Layer
+	m.bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
+		return func(c tele.Context) error {
+			sender := c.Sender()
+			chat := c.Chat()
+			text := c.Text()
+
+			cmd := text
+			if len(text) > 0 && text[0] == '/' {
+				for i, ch := range text {
+					if ch == ' ' || ch == '@' {
+						cmd = text[:i]
+						break
+					}
+				}
+			} else {
+				return nil // Drop any non-command messages
+			}
+
+			// Validate if the specific Sender/User natively has this permission in this Chat
+			if !m.store.VerifyTGCommand(sender.ID, chat.ID, cmd) {
+				log.Printf("Blocked unauthorized execution attempt: UserID=%d, ChatID=%d, Command=%s", sender.ID, chat.ID, cmd)
+				return nil // Drop silently to prevent spam
+			}
+
+			return next(c)
+		}
+	})
+
+	m.bot.Handle("/run", func(c tele.Context) error {
+		args := c.Args()
+		if len(args) < 2 {
+			return c.Reply("用法: /run <task_type> <target> [port] [speedtest] [workers]")
 		}
 
-		text := update.Message.Text
-
-		if strings.HasPrefix(text, "/run") {
-			handleRun(bot, update.Message)
+		taskType := args[0]
+		target := args[1]
+		port := "443,2053,2083,2087,2096,8443" // Default
+		if len(args) > 2 {
+			port = args[2]
 		}
-	}
-}
+		speedtest := "false"
+		if len(args) > 3 {
+			speedtest = args[3]
+		}
+		workers := ""
+		if len(args) > 4 {
+			workers = args[4]
+		}
 
-func handleRun(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
-	args := strings.Split(msg.Text, " ")
+		label := "Telegram Task"
+		desc := "Triggered by Telegram User"
+		task, err := m.store.CreateTask(label, desc, taskType, target, port, speedtest, workers)
+		if err != nil {
+			log.Println("Task Creation Error:", err)
+			return c.Reply("❌ 创建扫描任务失败: " + err.Error())
+		}
 
-	if len(args) < 3 {
-		reply(bot, msg.Chat.ID, "用法: /run scan target")
-		return
-	}
+		return c.Reply(fmt.Sprintf("✅ 扫描任务已加入队列!\nID: %d\n目标: %s\n状态: 待处理 (Pending)", task.ID, target))
+	})
 
-	taskType := args[1]
-	target := args[2]
-
-	taskID := fmt.Sprintf("%d", msg.MessageID)
-
-	task := map[string]string{
-		"id":     taskID,
-		"type":   taskType,
-		"target": target,
-	}
-
-	data, _ := json.Marshal(task)
-
-	// 写入队列
-	rdb.LPush(ctx, "queue:task", data)
-
-	// 初始化状态
-	rdb.HSet(ctx, "task:"+taskID, "status", "pending")
-
-	// 触发 GitHub Actions
-	triggerWorkflow()
-
-	reply(bot, msg.Chat.ID, "任务已提交："+taskID)
-}
-
-func triggerWorkflow() {
-	url := "https://api.github.com/repos/你的用户名/你的仓库/actions/workflows/worker.yml/dispatches"
-
-	payload := []byte(`{
-		"ref": "main"
-	}`)
-
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(payload))
-	req.Header.Set("Authorization", "Bearer "+os.Getenv("GITHUB_TOKEN"))
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	http.DefaultClient.Do(req)
-}
-
-func reply(bot *tgbotapi.BotAPI, chatID int64, text string) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	bot.Send(msg)
+	m.bot.Handle("/ping", func(c tele.Context) error {
+		return c.Reply("pong!")
+	})
 }

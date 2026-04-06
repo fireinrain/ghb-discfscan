@@ -4,34 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       workers:
-        description: "worker列表"
+        description: "Worker array, e.g. [1,2,3,4,5]"
         required: false
         default: "[1,2,3,4,5,6,7,8,9,10]"
-      task_type:
-        description: "任务类型"
+      task_id:
+        description: "The ID of the scan task in the database"
         required: true
-        default: "scan"
-      target:
-        description: "目标|CIDR|CIDRS|IP|IPS"
-        required: true
-      port:
-        description: "目标端口|80|80,443|80-1000"
-        required: true
-        default: "443,2053,2083,2087,2096,8443"
-      speedtest:
-        description: "是否进行测速"
-        required: true
-        default: "false"
-
-  push:
-    branches:
-      - main
 
 jobs:
   worker:
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         worker_id: ${{ fromJson(github.event.inputs.workers) }}
 
@@ -39,6 +24,8 @@ jobs:
       - uses: actions/checkout@v3
 
       - uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
 
       - name: Cache Go modules
         uses: actions/cache@v3
@@ -51,13 +38,12 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Init Go Modules
-        run: |
-            go mod tidy && go mod download
+        run: go mod tidy && go mod download
+
       - name: Run Worker
+        env:
+          REDIS_HOST: ${{ secrets.REDIS_HOST }}
+          REDIS_PORT: ${{ secrets.REDIS_PORT }}
+          REDIS_PASS: ${{ secrets.REDIS_PASS }}
         run: |
-          go run main.go \
-            --task_type=${{ github.event.inputs.task_type }} \
-            --target=${{ github.event.inputs.target }} \
-            --port=${{ github.event.inputs.port }} \
-            --speedtest=${{ github.event.inputs.speedtest }} \
-            --worker=${{ matrix.worker_id }}
+          go run main.go --worker=${{ matrix.worker_id }} --task=${{ github.event.inputs.task_id }}

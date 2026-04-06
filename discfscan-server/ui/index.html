@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Discfscan Central Console</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        darkBase: '#0F172A',
+                        glassBg: 'rgba(30, 41, 59, 0.7)',
+                        glassBorder: 'rgba(255, 255, 255, 0.1)'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0F172A;
+            color: #f8fafc;
+        }
+
+        .glass {
+            background: rgba(30, 41, 59, 0.6);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .bg-blob {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: radial-gradient(circle at 15% 50%, rgba(56, 189, 248, 0.10), transparent 30%),
+                radial-gradient(circle at 85% 30%, rgba(168, 85, 247, 0.10), transparent 30%);
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        .sidebar-item.active {
+            background: rgba(255, 255, 255, 0.1);
+            border-left: 4px solid #06b6d4;
+            color: white;
+        }
+    </style>
+</head>
+
+<body class="min-h-screen">
+    <div class="bg-blob"></div>
+    <div id="root" class="w-full h-screen"></div>
+
+    <script>
+        const API = {
+            login: '/api/auth/login',
+            changePassword: '/api/auth/change-password',
+            config: '/api/config',
+            tokens: '/api/tokens',
+            tgStatus: '/api/tg/status',
+            tgConfig: '/api/tg/config',
+            tgTest: '/api/tg/test',
+            tgRules: '/api/tg/rules',
+            tasks: '/api/tasks'
+        };
+
+        const state = {
+            view: 'login', // login, change_password, dashboard
+            activeMenu: 'config', // config, tokens
+            token: localStorage.getItem('jwt_token') || '',
+            isFirstLogin: false
+        };
+
+        const $ = (id) => document.getElementById(id);
+
+        function render() {
+            const root = $('root');
+            if (state.view === 'login') {
+                root.innerHTML = renderLogin();
+                attachLoginEvents();
+            } else if (state.view === 'change_password') {
+                root.innerHTML = renderChangePassword();
+                attachChangePasswordEvents();
+            } else if (state.view === 'dashboard') {
+                root.innerHTML = renderDashboard();
+                attachDashboardEvents();
+                loadDashboardData();
+            }
+        }
+
+        // --- HTTP Helper ---
+        async function fetchAPI(url, method = 'GET', body = null) {
+            const headers = { 'Content-Type': 'application/json' };
+            if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
+
+            const req = { method, headers };
+            if (body) req.body = JSON.stringify(body);
+
+            const res = await fetch(url, req);
+            if (res.status === 401) {
+                state.token = '';
+                localStorage.removeItem('jwt_token');
+                state.view = 'login';
+                render();
+                throw new Error("Unauthorized");
+            }
+
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || "Request failed");
+            }
+            return res.json();
+        }
+
+        // --- Views ---
+        function renderLogin() {
+            return `
+            <div class="flex items-center justify-center h-full">
+                <div class="glass p-8 rounded-2xl shadow-2xl w-full max-w-md">
+                    <div class="text-center mb-8">
+                        <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-purple-500 tracking-tight mb-2">Nexus Console</h1>
+                        <p class="text-slate-400">Sign in to access your dashboard</p>
+                    </div>
+                    <form id="loginForm" class="space-y-6">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-400 mb-1">Username</label>
+                            <input type="text" id="username" value="admin" class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400" required>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-400 mb-1">Password</label>
+                            <input type="password" id="password" class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400" required>
+                        </div>
+                        <button type="submit" class="w-full py-3 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-medium rounded-lg shadow-lg shadow-cyan-500/30 transition-all active:scale-95">Sign In</button>
+                    </form>
+                </div>
+            </div>`;
+        }
+
+        function renderChangePassword() {
+            return `
+            <div class="flex items-center justify-center h-full">
+                <div class="glass p-8 rounded-2xl shadow-2xl w-full max-w-md border border-yellow-500/30">
+                    <div class="text-center mb-8">
+                        <div class="w-12 h-12 bg-yellow-500/20 text-yellow-400 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8V7a4 4 0 00-8 0v4h8z"></path></svg>
+                        </div>
+                        <h1 class="text-2xl font-bold text-white mb-2">Security Action Required</h1>
+                        <p class="text-slate-400 text-sm">Please change your default password before accessing the dashboard.</p>
+                    </div>
+                    <form id="changePwdForm" class="space-y-6">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-400 mb-1">New Password</label>
+                            <input type="password" id="newPassword" minlength="5" class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-yellow-400 focus:ring-1 focus:ring-yellow-400" required>
+                        </div>
+                        <button type="submit" class="w-full py-3 bg-gradient-to-r from-yellow-500 to-orange-600 hover:from-yellow-400 hover:to-orange-500 text-white font-medium rounded-lg shadow-lg shadow-yellow-500/30 transition-all active:scale-95">Update Password</button>
+                    </form>
+                </div>
+            </div>`;
+        }
+
+        function renderDashboard() {
+            return `
+            <div class="flex h-screen overflow-hidden">
+                <!-- Sidebar -->
+                <aside class="w-64 glass border-r border-white/5 flex flex-col hidden sm:flex shrink-0">
+                    <div class="p-6 border-b border-white/5">
+                        <h1 class="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-purple-500 tracking-tight">Nexus</h1>
+                    </div>
+                    <nav class="flex-1 px-4 py-6 space-y-2">
+                        <button class="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-slate-300 hover:bg-white/5 transition-colors sidebar-item ${state.activeMenu === 'config' ? 'active' : ''}" data-menu="config">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                            Global Settings
+                        </button>
+                        <button class="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-slate-300 hover:bg-white/5 transition-colors sidebar-item ${state.activeMenu === 'tokens' ? 'active' : ''}" data-menu="tokens">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+                            Access Tokens
+                        </button>
+                        <button class="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-slate-300 hover:bg-white/5 transition-colors sidebar-item ${state.activeMenu === 'telegram' ? 'active' : ''}" data-menu="telegram">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                            Telegram Bot
+                        </button>
+                        <button class="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-slate-300 hover:bg-white/5 transition-colors sidebar-item ${state.activeMenu === 'tasks' ? 'active' : ''}" data-menu="tasks">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                            Task History
+                        </button>
+                    </nav>
+                    <div class="p-4 border-t border-white/5">
+                        <button id="logoutBtn" class="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm text-slate-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                            Sign Out
+                        </button>
+                    </div>
+                </aside>
+
+                <!-- Main Content -->
+                <main class="flex-1 flex flex-col h-screen overflow-hidden relative">
+                    <header class="sm:hidden glass px-6 py-4 flex justify-between items-center z-10 border-b border-white/5">
+                        <h1 class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-purple-500">Nexus</h1>
+                        <button id="mobileMenuBtn" class="text-slate-300">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+                        </button>
+                    </header>
+
+                    <div class="flex-1 overflow-y-auto p-4 sm:p-8" id="dashboardContent">
+                        <!-- Injected Content -->
+                    </div>
+                </main>
+            </div>`;
+        }
+
+        // --- Sub-views for Dashboard ---
+        function renderConfigView() {
+            return `
+            <div class="max-w-3xl">
+                <header class="mb-8">
+                    <h2 class="text-3xl font-bold text-white mb-2">Global Settings</h2>
+                    <p class="text-slate-400">Configure the underlying GitHub Actions runner integrations here.</p>
+                </header>
+
+                <div class="glass rounded-2xl p-6 shadow-xl border-t border-cyan-500/30">
+                    <form id="dashConfigForm" class="space-y-6">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-300 mb-1">GitHub API Token</label>
+                            <input type="text" id="githubToken" placeholder="ghp_••••••••••••"
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400">
+                            <p class="text-xs text-slate-500 mt-2">Requires 'workflow_dispatch' permissions.</p>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-300 mb-1">GitHub Target Repo</label>
+                            <input type="text" id="githubRepo" placeholder="username/repository"
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-300 mb-1">Default Worker Count</label>
+                            <input type="number" id="githubWorkers" placeholder="10" min="1" max="100"
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400">
+                            <p class="text-xs text-slate-500 mt-2">Example: 10 will generate [1,2,3...10]</p>
+                        </div>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="glass rounded-2xl p-6 mt-6 shadow-xl border-t border-purple-500/30">
+                    <h3 class="text-lg font-semibold mb-4 text-white">Redis Queue Connection</h3>
+                    <p class="text-sm text-slate-400 mb-4">Workers fetch their task from Redis on startup using these credentials.</p>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div class="sm:col-span-2">
+                            <label class="block text-sm font-medium text-slate-300 mb-1">Redis Host</label>
+                            <input type="text" id="redisHost" placeholder="your-redis-host.com"
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-300 mb-1">Port</label>
+                            <input type="text" id="redisPort" placeholder="6379"
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400">
+                        </div>
+                    </div>
+                    <div class="mt-4">
+                        <label class="block text-sm font-medium text-slate-300 mb-1">Redis Password (optional)</label>
+                        <input type="password" id="redisPass" placeholder="your-redis-password"
+                            class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400">
+                        <p class="text-xs text-slate-500 mt-2">Set <code class="text-purple-400">REDIS_HOST</code>, <code class="text-purple-400">REDIS_PORT</code>, <code class="text-purple-400">REDIS_PASS</code> as GitHub Secrets in your repo — workers will read them from env vars.</p>
+                    </div>
+                </div>
+
+                <div class="glass rounded-2xl p-6 mt-6 shadow-xl border-t border-green-500/30">
+                    <h3 class="text-lg font-semibold mb-4 text-white">Default Scan Settings</h3>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-300 mb-1">Default Ports</label>
+                            <input type="text" id="defaultPorts" placeholder="443,2053,2083,2087,2096,8443"
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-green-400 focus:ring-1 focus:ring-green-400">
+                            <p class="text-xs text-slate-500 mt-1">Comma-separated. Used when the caller doesn't specify ports.Support all masscan ports format</p>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <label class="text-sm font-medium text-slate-300">Speedtest by Default</label>
+                            <select id="defaultSpeedtest" class="bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-green-400 focus:ring-1 focus:ring-green-400 cursor-pointer">
+                                <option value="false">Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="pt-6">
+                    <button type="submit" form="dashConfigForm" class="w-full sm:w-auto px-10 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold rounded-xl shadow-lg shadow-cyan-500/30 transition-all active:scale-95">&#10003;&nbsp; Save All Configuration</button>
+                </div>
+            </div>`;
+        }
+
+        function renderTasksView() {
+            return `
+            <div class="max-w-6xl">
+                <header class="mb-8 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+                    <div>
+                        <h2 class="text-3xl font-bold text-white mb-2">Task History & Management</h2>
+                        <p class="text-slate-400">Launch new scans and monitor their progress. Tasks run sequentially.</p>
+                    </div>
+                </header>
+
+                <!-- New Task Form -->
+                <div class="glass rounded-2xl p-6 mb-8 border-t border-cyan-500/30 shadow-xl">
+                    <h3 class="text-lg font-semibold text-white mb-6 flex items-center gap-2">
+                        <svg class="w-5 h-5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        Submit New Scan
+                    </h3>
+                    <form id="newTaskForm" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-400 mb-1">Task Label (e.g. Cloudflare IPs)</label>
+                            <input type="text" id="taskLabel" placeholder="My New Scan"
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-400 mb-1">Description (e.g. All regions)</label>
+                            <input type="text" id="taskDesc" placeholder="Description of this scan"
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-400 mb-1">Target(s) (CIDR or Range)</label>
+                            <input type="text" id="taskTarget" placeholder="1.0.0.0/24, 2.0.0.0-2.0.0.255" required
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-400 mb-1">Scan Ports</label>
+                            <input type="text" id="taskPorts" placeholder="443,2053,2087"
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-400 mb-1">Worker Count</label>
+                            <input type="number" id="taskWorkers" placeholder="10" min="1" max="100"
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
+                        </div>
+                        <div class="flex items-center gap-4 pt-6">
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <div class="relative">
+                                    <input type="checkbox" id="taskSpeedtest" class="sr-only peer">
+                                    <div class="w-10 h-5 bg-slate-700 rounded-full peer peer-checked:bg-cyan-500 transition-all"></div>
+                                    <div class="absolute left-1 top-1 w-3 h-3 bg-white rounded-full peer-checked:translate-x-5 transition-all"></div>
+                                </div>
+                                <span class="text-sm font-medium text-slate-400 group-hover:text-white">Enable Speedtest</span>
+                            </label>
+                            <button type="submit" class="ml-auto px-6 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white text-sm font-semibold rounded-lg shadow-lg shadow-cyan-900/20 transition-all flex items-center gap-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                                Add to Queue
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="glass rounded-2xl overflow-hidden shadow-xl border border-white/5">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-white/5 border-b border-white/10">
+                                <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">ID</th>
+                                <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Status</th>
+                                <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Label / Description</th>
+                                <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Progress</th>
+                                <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Target</th>
+                                <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Workers</th>
+                                <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Created At</th>
+                                <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Completed At</th>
+                                <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tasksTableBody" class="divide-y divide-white/5">
+                            <!-- Tasks injected here -->
+                        </tbody>
+                    </table>
+                    <div id="tasksEmpty" class="hidden p-12 text-center text-slate-500">
+                        <p>No tasks in the queue.</p>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function renderTokensView() {
+            return `
+            <div class="max-w-4xl">
+                <header class="mb-8 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+                    <div>
+                        <h2 class="text-3xl font-bold text-white mb-2">Access Tokens</h2>
+                        <p class="text-slate-400">Tokens here act as Bearer keys to trigger tasks externally.</p>
+                    </div>
+                </header>
+
+                <div class="glass rounded-2xl p-6 mb-8 shadow-xl border border-white/5">
+                    <h3 class="text-lg font-semibold mb-4 text-white">Generate Context Token</h3>
+                    <form id="dashTokenForm" class="flex flex-col sm:flex-row gap-4 align-middle">
+                        <input type="text" id="tokenDesc" required placeholder="Description (e.g. Server A)"
+                                class="flex-1 bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 border-white text-white placeholder-slate-400 focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400">
+                        <select id="tokenExpire" class="w-full sm:w-40 bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 cursor-pointer">
+                            <option value="0">Never Expire</option>
+                            <option value="1">1 Hour</option>
+                            <option value="24">24 Hours</option>
+                            <option value="168">7 Days</option>
+                            <option value="720">30 Days</option>
+                            <option value="2160">3 Months</option>
+                            <option value="4320">6 Months</option>
+                            <option value="8760">1 Year</option>
+                            <option value="26280">3 Years</option>
+                            <option value="43800">5 Years</option>
+                            <option value="87600">10 Years</option>
+                        </select>
+                        <button type="submit" class="px-8 py-3 bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-400 hover:to-indigo-500 text-white font-medium rounded-lg shadow-lg shadow-purple-500/30 transition-all active:scale-95 whitespace-nowrap">Generate</button>
+                    </form>
+                </div>
+
+                <div class="glass rounded-2xl p-6 mb-8 shadow-xl border border-blue-500/30">
+                    <h3 class="text-lg font-semibold mb-2 text-white">API Call Example (cURL)</h3>
+                    <p class="text-sm text-slate-400 mb-4">You can call this API in scripts with the Authorization header:</p>
+                    <div class="bg-black/50 p-4 rounded-lg border border-slate-700 overflow-x-auto">
+                        <pre class="text-sm font-mono text-cyan-300">curl -X POST http://&lt;Server IP&gt;:9999/api/scan \
+  -H "Authorization: Bearer &lt;Your Token Secret&gt;" \
+  -H "Content-Type: application/json" \\
+   -d '{
+     "target": "1.1.1.0/24",
+     "port": "443,8443",
+     "speedtest": "true",
+     "workers": "[1,2,3,4,5,6,7,8,9,10]"
+   }'</pre>
+                    </div>
+                </div>
+
+                <div class="glass rounded-2xl overflow-hidden shadow-xl border border-white/5">
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left border-collapse">
+                            <thead>
+                                <tr class="bg-slate-800/30 text-slate-300 text-sm border-b border-white/5">
+                                    <th class="px-6 py-4 font-medium">Description</th>
+                                    <th class="px-6 py-4 font-medium">Token Secret</th>
+                                    <th class="px-6 py-4 font-medium">Expires</th>
+                                    <th class="px-6 py-4 font-medium text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dashTokenBody">
+                                <tr><td colspan="4" class="text-center py-8 text-slate-500">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>`;
+        }
+        // --- Telegram Dashboard Block ---
+        function renderTelegramView() {
+            return `
+            <div class="max-w-5xl">
+                <header class="mb-8">
+                    <h2 class="text-3xl font-bold text-white mb-2">Telegram Bot Integration</h2>
+                    <p class="text-slate-400">Manage the remote execution bot engine, test connectivity, and bind access rules natively.</p>
+                </header>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+                    <!-- Config & Status -->
+                    <div class="glass rounded-2xl p-6 shadow-xl border-t border-cyan-500/30">
+                        <div class="flex justify-between items-center mb-6">
+                            <h3 class="text-lg font-semibold text-white">Engine Configuration</h3>
+                            <div id="tgStatusBadge" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-600">Checking...</div>
+                        </div>
+                        <form id="tgConfigForm" class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Bot Token</label>
+                                <input type="text" id="tgTokenInput" placeholder="1234:AA..." autocomplete="off"
+                                    class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400">
+                                <p class="text-xs text-slate-500 mt-1">Leave empty to shutdown the bot safely.</p>
+                            </div>
+                            <button type="submit" class="w-full py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-medium rounded-lg transition-all active:scale-95">Restart / Apply Config</button>
+                        </form>
+                    </div>
+
+                    <!-- Push Tester -->
+                    <div class="glass rounded-2xl p-6 shadow-xl border-t border-purple-500/30">
+                        <h3 class="text-lg font-semibold text-white mb-6">Ping Push Tester</h3>
+                        <form id="tgTestForm" class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Target Chat ID / User ID</label>
+                                <input type="number" id="tgTestID" placeholder="-1001234..." required
+                                    class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-purple-400">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-300 mb-1">Message Text</label>
+                                <input type="text" id="tgTestMsg" value="Hello from Discfscan Control Panel!" required
+                                    class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-purple-400">
+                            </div>
+                            <button type="submit" class="w-full py-2.5 bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-400 hover:to-indigo-500 text-white font-medium rounded-lg transition-all active:scale-95">Send Test Message</button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- ACL Rules -->
+                <div class="glass rounded-2xl p-6 shadow-xl border-t border-green-500/30">
+                    <h3 class="text-lg font-semibold text-white mb-2">Access Control List (ACL)</h3>
+                    <p class="text-sm text-slate-400 mb-6">Assign specific Users and Groups operational clearance for the bot.</p>
+                    
+                    <form id="tgRuleForm" class="flex flex-col md:flex-row gap-4 mb-6">
+                        <input type="text" id="rulName" placeholder="Name tag (e.g. Admin)" required class="flex-1 bg-slate-800/80 border box-border border-slate-600 rounded px-3 py-2 text-white">
+                        <input type="number" id="rulUserId" required placeholder="User ID (required)" class="flex-1 bg-slate-800/80 border box-border border-slate-600 rounded px-3 py-2 text-white">
+                        <input type="number" id="rulChatId" placeholder="Chat Focus (Optional)" value="0" class="flex-1 bg-slate-800/80 border box-border border-slate-600 rounded px-3 py-2 text-white">
+                        <input type="text" id="rulCmds" placeholder="/run,/ping" value="*" required class="flex-1 bg-slate-800/80 border box-border border-slate-600 rounded px-3 py-2 text-white">
+                        <button type="submit" class="px-6 py-2 bg-green-600 hover:bg-green-500 text-white rounded font-medium transition-colors whitespace-nowrap">Add Rule</button>
+                    </form>
+
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left border-collapse">
+                            <thead>
+                                <tr class="bg-slate-800/30 text-slate-300 text-sm border-b border-white/5">
+                                    <th class="px-4 py-3">Tag Name</th>
+                                    <th class="px-4 py-3">User ID</th>
+                                    <th class="px-4 py-3">Chat Focus</th>
+                                    <th class="px-4 py-3">Allowed Cmds</th>
+                                    <th class="px-4 py-3 text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tgRulesBody">
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        // --- Event Attachments ---
+        function attachLoginEvents() {
+            $('loginForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                try {
+                    const data = await fetchAPI(API.login, 'POST', {
+                        username: $('username').value,
+                        password: $('password').value
+                    });
+                    state.token = data.token;
+                    localStorage.setItem('jwt_token', data.token);
+                    state.isFirstLogin = data.is_first_login;
+                    state.view = state.isFirstLogin ? 'change_password' : 'dashboard';
+                    render();
+                } catch (err) {
+                    alert('Login failed: ' + err.message);
+                }
+            });
+        }
+
+        function attachChangePasswordEvents() {
+            $('changePwdForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                try {
+                    await fetchAPI(API.changePassword, 'POST', {
+                        new_password: $('newPassword').value
+                    });
+                    state.isFirstLogin = false;
+                    state.view = 'dashboard';
+                    render();
+                } catch (err) {
+                    alert('Failed: ' + err.message);
+                }
+            });
+        }
+
+        function attachDashboardEvents() {
+            $('logoutBtn').addEventListener('click', () => {
+                state.token = '';
+                localStorage.removeItem('jwt_token');
+                state.view = 'login';
+                render();
+            });
+
+            document.querySelectorAll('.sidebar-item').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const menu = e.currentTarget.dataset.menu;
+                    state.activeMenu = menu;
+                    render(); // Re-render to update sidebar active state
+                });
+            });
+        }
+
+        // --- Data Loading ---
+        async function loadDashboardData() {
+            const content = $('dashboardContent');
+            if (state.activeMenu === 'config') {
+                content.innerHTML = renderConfigView();
+
+                try {
+                    const data = await fetchAPI(API.config);
+                    $('githubToken').value = data.github_token || '';
+                    $('githubRepo').value = data.github_repo || '';
+                    $('githubWorkers').value = data.github_workers || '10';
+                    $('redisHost').value = data.redis_host || '';
+                    $('redisPort').value = data.redis_port || '';
+                    $('redisPass').value = data.redis_pass || '';
+                    $('defaultPorts').value = data.default_ports || '443,2053,2083,2087,2096,8443';
+                    $('defaultSpeedtest').value = data.default_speedtest || 'false';
+                } catch (e) { }
+
+                $('dashConfigForm').addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    try {
+                        await fetchAPI(API.config, 'POST', {
+                            github_token: $('githubToken').value,
+                            github_repo: $('githubRepo').value,
+                            github_workers: $('githubWorkers').value,
+                            redis_host: $('redisHost').value,
+                            redis_port: $('redisPort').value,
+                            redis_pass: $('redisPass').value,
+                            default_ports: $('defaultPorts').value,
+                            default_speedtest: $('defaultSpeedtest').value
+                        });
+                        alert('✅ Configuration saved successfully!');
+                    } catch (err) { alert('Save failed: ' + err.message); }
+                });
+
+            } else if (state.activeMenu === 'tokens') {
+                content.innerHTML = renderTokensView();
+
+                $('dashTokenForm').addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    try {
+                        const payload = {
+                            description: $('tokenDesc').value,
+                            expire_hours: parseInt($('tokenExpire').value)
+                        };
+                        await fetchAPI(API.tokens, 'POST', payload);
+                        $('tokenDesc').value = '';
+                        reloadTokensGrid();
+                    } catch (err) { alert('Generate failed: ' + err.message); }
+                });
+
+                reloadTokensGrid();
+            } else if (state.activeMenu === 'telegram') {
+                content.innerHTML = renderTelegramView();
+                initTelegramLogic();
+            } else if (state.activeMenu === 'tasks') {
+                content.innerHTML = renderTasksView();
+                initTasksLogic();
+            }
+        }
+
+        async function initTasksLogic() {
+            const refreshTasks = async () => {
+                try {
+                    const tasks = await fetchAPI(API.tasks);
+                    const tbody = $('tasksTableBody');
+                    tbody.innerHTML = '';
+                    if (tasks.length === 0) {
+                        $('tasksEmpty').classList.remove('hidden');
+                        return;
+                    }
+                    $('tasksEmpty').classList.add('hidden');
+                    tasks.forEach(t => {
+                        const tr = document.createElement('tr');
+                        tr.className = 'hover:bg-white/5 transition-colors';
+                        
+                        const statusClass = {
+                            'pending': 'bg-slate-500/20 text-slate-400 border-slate-500/50',
+                            'running': 'bg-cyan-500/20 text-cyan-400 border-cyan-500/50 animate-pulse',
+                            'completed': 'bg-green-500/20 text-green-400 border-green-500/50',
+                            'failed': 'bg-red-500/20 text-red-500 border-red-500/50',
+                            'cancelled': 'bg-orange-500/20 text-orange-400 border-orange-500/50'
+                        }[t.status] || 'bg-slate-500/20 text-slate-400';
+
+                        tr.innerHTML = `
+                            <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400 font-mono">#${t.id}</td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                <span class="px-2.5 py-0.5 rounded-full text-xs font-medium border ${statusClass}">${t.status.toUpperCase()}</span>
+                            </td>
+                            <td class="px-6 py-4">
+                                <div class="text-sm font-medium text-white">${t.label || 'Unnamed Task'}</div>
+                                <div class="text-xs text-slate-400">${t.description || 'No description'}</div>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                <div class="w-24 bg-slate-700/50 rounded-full h-1.5 overflow-hidden">
+                                    <div class="bg-cyan-500 h-full transition-all duration-500" style="width: ${t.progress}%"></div>
+                                </div>
+                                <div class="text-[10px] text-slate-500 mt-1">${t.progress}% complete</div>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400">${t.target}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400 font-mono">${t.workers || '-'}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400">${new Date(t.created_at).toLocaleString()}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400">${t.completed_at ? new Date(t.completed_at).toLocaleString() : '-'}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-right space-x-2">
+                                ${t.status === 'pending' ? `
+                                    <button class="p-1.5 text-slate-400 hover:text-cyan-400 title="Promote to Top" onclick="taskAction(${t.id}, 'promote')">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
+                                    </button>
+                                    <button class="p-1.5 text-slate-400 hover:text-orange-400" title="Cancel Task" onclick="taskAction(${t.id}, 'cancel')">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                    </button>
+                                ` : ''}
+                                ${t.status === 'pending' || t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled' ? `
+                                    <button class="p-1.5 text-slate-400 hover:text-red-500" title="Delete Task" onclick="taskAction(${t.id}, 'delete')">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                    </button>
+                                ` : ''}
+                            </td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                } catch (e) { }
+            };
+
+            const taskForm = document.getElementById('newTaskForm');
+            if (taskForm) {
+                taskForm.onsubmit = async (e) => {
+                    e.preventDefault();
+                    const payload = {
+                        label: document.getElementById('taskLabel').value,
+                        description: document.getElementById('taskDesc').value,
+                        target: document.getElementById('taskTarget').value,
+                        port: document.getElementById('taskPorts').value,
+                        workers: document.getElementById('taskWorkers').value,
+                        speedtest: document.getElementById('taskSpeedtest').checked ? 'true' : 'false'
+                    };
+                    try {
+                        await fetchAPI(API.tasks, 'POST', payload);
+                        taskForm.reset();
+                        refreshTasks();
+                    } catch (err) { alert('Failed to submit task: ' + err.message); }
+                };
+            }
+
+            window.taskAction = async (id, action) => {
+                try {
+                    if (action === 'delete') {
+                        if (!confirm('Are you sure you want to delete this task record?')) return;
+                        await fetchAPI(`${API.tasks}/${id}`, 'DELETE');
+                    } else {
+                        await fetchAPI(`${API.tasks}/${id}/${action}`, 'POST');
+                    }
+                    refreshTasks();
+                } catch (err) { alert('Action failed: ' + err.message); }
+            };
+
+            await refreshTasks();
+            const interval = setInterval(() => {
+                if (state.activeMenu === 'tasks' && state.view === 'dashboard') refreshTasks();
+                else clearInterval(interval);
+            }, 5000);
+        }
+
+        async function initTelegramLogic() {
+            const refreshStatus = async () => {
+                try {
+                    const st = await fetchAPI(API.tgStatus);
+                    $('tgTokenInput').value = st.token || '';
+                    const badge = $('tgStatusBadge');
+                    if (st.is_running) {
+                        badge.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-green-500/20 text-green-400 border border-green-500/50 shadow-[0_0_10px_rgba(34,197,94,0.2)]';
+                        badge.innerText = '● Engine Active';
+                    } else {
+                        badge.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-red-500/20 text-red-500 border border-red-500/50';
+                        badge.innerText = '○ Stopped';
+                    }
+                } catch (e) { }
+            };
+
+            await refreshStatus();
+
+            $('tgConfigForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                try {
+                    await fetchAPI(API.tgConfig, 'POST', { token: $('tgTokenInput').value });
+                    alert('Engine sequence successfully dispatched!');
+                    refreshStatus();
+                } catch (err) { alert('Failed: ' + err.message); }
+            });
+
+            $('tgTestForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                try {
+                    await fetchAPI(API.tgTest, 'POST', {
+                        chat_id: parseInt($('tgTestID').value),
+                        text: $('tgTestMsg').value
+                    });
+                    alert('Ping packet successfully transmitted.');
+                } catch (err) { alert('API Error: ' + err.message); }
+            });
+
+            const reloadRules = async () => {
+                const tbody = $('tgRulesBody');
+                try {
+                    const rules = await fetchAPI(API.tgRules);
+                    if (!rules || rules.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-slate-500">No active rules defined.</td></tr>';
+                        return;
+                    }
+                    tbody.innerHTML = rules.map(r => `
+                        <tr class="border-b border-white/5 hover:bg-slate-800/40">
+                            <td class="px-4 py-3">${r.name || '--'}</td>
+                            <td class="px-4 py-3 font-mono text-cyan-400">${r.user_id}</td>
+                            <td class="px-4 py-3 font-mono text-purple-400">${r.chat_id === 0 ? 'Any' : r.chat_id}</td>
+                            <td class="px-4 py-3"><code class="bg-black/30 px-2 py-1 rounded text-green-400">${r.commands}</code></td>
+                            <td class="px-4 py-3 text-right">
+                                <button onclick="deleteTGRule(${r.id})" class="text-red-400 hover:text-red-300">Remove</button>
+                            </td>
+                        </tr>
+                    `).join('');
+                } catch (e) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-red-400">Error loading rules.</td></tr>';
+                }
+            };
+
+            window.deleteTGRule = async (id) => {
+                if (!confirm('Drop this rule binding?')) return;
+                await fetchAPI(API.tgRules + '/' + id, 'DELETE');
+                reloadRules();
+            };
+
+            $('tgRuleForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                try {
+                    await fetchAPI(API.tgRules, 'POST', {
+                        user_id: parseInt($('rulUserId').value),
+                        chat_id: parseInt($('rulChatId').value) || 0,
+                        name: $('rulName').value,
+                        commands: $('rulCmds').value
+                    });
+                    $('rulUserId').value = '';
+                    $('rulName').value = '';
+                    reloadRules();
+                } catch (err) { alert('Error: ' + err.message); }
+            });
+
+            reloadRules();
+        }
+
+        async function reloadTokensGrid() {
+            const tbody = $('dashTokenBody');
+            try {
+                const tokens = await fetchAPI(API.tokens);
+                if (!tokens || tokens.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="text-center py-8 text-slate-500">No active tokens.</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = tokens.map(t => {
+                    let expireText = '<span class="text-green-400 text-xs font-semibold px-2 py-1 bg-green-400/10 rounded">Never</span>';
+                    let isExpired = false;
+
+                    if (t.expires_at) {
+                        const expDate = new Date(t.expires_at);
+                        isExpired = expDate < new Date();
+                        if (isExpired) {
+                            expireText = '<span class="text-red-400 text-xs font-semibold px-2 py-1 bg-red-400/10 rounded">Expired</span>';
+                        } else {
+                            expireText = `<span class="text-slate-400 text-sm">${expDate.toLocaleString()}</span>`;
+                        }
+                    }
+
+                    return `
+                    <tr class="border-b border-white/5 hover:bg-slate-800/40 transition-colors ${isExpired ? 'opacity-50' : ''}">
+                        <td class="px-6 py-4 font-medium text-slate-200">
+                            ${t.description}
+                        </td>
+                        <td class="px-6 py-4">
+                            <code onclick="${isExpired ? '' : `navigator.clipboard.writeText('${t.token}');alert('Copied!')`}" class="${isExpired ? 'cursor-not-allowed text-slate-500' : 'cursor-pointer text-cyan-400 hover:bg-black/60'} px-2 py-1 bg-black/40 rounded font-mono text-sm tracking-widest transition-colors" title="${isExpired ? 'Expired token' : 'Click to copy'}">${t.token}</code>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            ${expireText}
+                        </td>
+                        <td class="px-6 py-4 text-right">
+                            <button onclick="revokeToken(${t.id})" class="px-3 py-1 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded transition-colors text-sm font-medium">Revoke</button>
+                        </td>
+                    </tr>
+                `}).join('');
+            } catch (e) {
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center py-8 text-red-400">Failed to load</td></tr>';
+            }
+        }
+
+        window.revokeToken = async (id) => {
+            if (!confirm("Revoke token?")) return;
+            await fetchAPI(`${API.tokens}/${id}`, 'DELETE');
+            reloadTokensGrid();
+        };
+
+        // --- Init ---
+        if (!state.token) {
+            state.view = 'login';
+        } else {
+            // Optimistic rendering
+            state.view = 'dashboard';
+        }
+        render();
+
+    </script>
+</body>
+
+</html>
