@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -397,7 +398,6 @@ func (s *APIServer) handleGetConfig(c echo.Context) error {
 		"redis_host":     s.store.GetConfig("redis_host"),
 		"redis_port":     s.store.GetConfig("redis_port"),
 		"redis_pass":     s.store.GetConfig("redis_pass"),
-		"server_url":     s.store.GetConfig("server_url"),
 		"default_ports": func() string {
 			if v := s.store.GetConfig("default_ports"); v != "" {
 				return v
@@ -445,9 +445,6 @@ func (s *APIServer) handleSetConfig(c echo.Context) error {
 	if val, ok := req["default_speedtest"]; ok {
 		s.store.SetConfig("default_speedtest", val)
 	}
-	if val, ok := req["server_url"]; ok {
-		s.store.SetConfig("server_url", val)
-	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "success"})
 }
@@ -474,8 +471,10 @@ func (s *APIServer) handleTGConfig(c echo.Context) error {
 
 func (s *APIServer) handleTGStatus(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"is_running": s.tgBotManager.IsRunning(),
-		"token":      s.store.GetConfig("tg_token"),
+		"is_running":   s.tgBotManager.IsRunning(),
+		"token":        s.store.GetConfig("tg_token"),
+		"test_chat_id": s.store.GetConfig("tg_test_id"),
+		"test_message": s.store.GetConfig("tg_test_msg"),
 	})
 }
 
@@ -487,6 +486,11 @@ func (s *APIServer) handleTGTest(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request"})
 	}
+
+	// Save to config first
+	s.store.SetConfig("tg_test_id", fmt.Sprintf("%d", req.ChatID))
+	s.store.SetConfig("tg_test_msg", req.Text)
+
 	if err := s.tgBotManager.SendTestMessage(req.ChatID, req.Text); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -535,11 +539,27 @@ func (s *APIServer) Start(address string) error {
 // ─── Task Queue Handlers ─────────────────────────────────────────────────────
 
 func (s *APIServer) handleListTasks(c echo.Context) error {
-	tasks, err := s.store.ListTasks()
+	page, _ := strconv.Atoi(c.QueryParam("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(c.QueryParam("limit"))
+	if limit < 1 || limit > 100 {
+		limit = 15 // Default page size
+	}
+
+	tasks, total, err := s.store.ListTasksPaged(page, limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
-	return c.JSON(http.StatusOK, tasks)
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"tasks":       tasks,
+		"total":       total,
+		"page":        page,
+		"page_size":   limit,
+		"total_pages": int64(math.Ceil(float64(total) / float64(limit))),
+	})
 }
 
 func (s *APIServer) handleCreateTask(c echo.Context) error {

@@ -51,6 +51,24 @@
             border-left: 4px solid #06b6d4;
             color: white;
         }
+
+        /* Drawer Animation */
+        .drawer-overlay {
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        }
+        .drawer-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        .drawer-content {
+            transform: translateX(100%);
+            transition: transform 0.3s ease-out;
+        }
+        .drawer-content.active {
+            transform: translateX(0);
+        }
     </style>
 </head>
 
@@ -73,9 +91,13 @@
 
         const state = {
             view: 'login', // login, change_password, dashboard
-            activeMenu: 'config', // config, tokens
+            activeMenu: 'config', // config, tokens, tasks
             token: localStorage.getItem('jwt_token') || '',
-            isFirstLogin: false
+            isFirstLogin: false,
+            tasksPage: 1,
+            tasksLimit: 15,
+            tasksTotal: 0,
+            tasksTotalPages: 0
         };
 
         const $ = (id) => document.getElementById(id);
@@ -299,63 +321,17 @@
 
         function renderTasksView() {
             return `
-            <div class="max-w-6xl">
+            <div class="w-full">
                 <header class="mb-8 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
                     <div>
                         <h2 class="text-3xl font-bold text-white mb-2">Task History & Management</h2>
-                        <p class="text-slate-400">Launch new scans and monitor their progress. Tasks run sequentially.</p>
+                        <p class="text-slate-400">Monitor scans and manage the worker queue. Tasks run sequentially.</p>
                     </div>
-                </header>
-
-                <!-- New Task Form -->
-                <div class="glass rounded-2xl p-6 mb-8 border-t border-cyan-500/30 shadow-xl">
-                    <h3 class="text-lg font-semibold text-white mb-6 flex items-center gap-2">
-                        <svg class="w-5 h-5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <button onclick="toggleDrawer(true)" class="px-6 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold rounded-lg shadow-lg shadow-cyan-500/30 transition-all flex items-center gap-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
                         Submit New Scan
-                    </h3>
-                    <form id="newTaskForm" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        <div>
-                            <label class="block text-sm font-medium text-slate-400 mb-1">Task Label (e.g. Cloudflare IPs)</label>
-                            <input type="text" id="taskLabel" placeholder="My New Scan"
-                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-slate-400 mb-1">Description (e.g. All regions)</label>
-                            <input type="text" id="taskDesc" placeholder="Description of this scan"
-                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
-                        </div>
-                        <div class="md:col-span-2 lg:col-span-3">
-                            <label class="block text-sm font-medium text-slate-400 mb-1">Target(s) (ASN, CIDR, Range or IP)</label>
-                            <textarea id="taskTarget" placeholder="AS13335 (Resolves to Cloudflare prefixes)&#10;1.1.1.0/24&#10;8.8.8.8, 1.0.0.0-1.0.0.255" required
-                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400 font-mono h-32"></textarea>
-                            <p class="text-[11px] text-slate-500 mt-1">Supports multi-line, AS Numbers (e.g. AS13335), and automatic /32 conversion for single IPs.</p>
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-slate-400 mb-1">Scan Ports</label>
-                            <input type="text" id="taskPorts" placeholder="443,2053,2087"
-                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-slate-400 mb-1">Worker Count</label>
-                            <input type="number" id="taskWorkers" placeholder="10" min="1" max="100"
-                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
-                        </div>
-                        <div class="flex items-center gap-4 pt-6">
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <div class="relative">
-                                    <input type="checkbox" id="taskSpeedtest" class="sr-only peer" checked>
-                                    <div class="w-10 h-5 bg-slate-700 rounded-full peer peer-checked:bg-cyan-500 transition-all"></div>
-                                    <div class="absolute left-1 top-1 w-3 h-3 bg-white rounded-full peer-checked:translate-x-5 transition-all"></div>
-                                </div>
-                                <span class="text-sm font-medium text-slate-400 group-hover:text-white">Enable Speedtest</span>
-                            </label>
-                            <button type="submit" class="ml-auto px-6 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white text-sm font-semibold rounded-lg shadow-lg shadow-cyan-900/20 transition-all flex items-center gap-2">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                                Add to Queue
-                            </button>
-                        </div>
-                    </form>
-                </div>
+                    </button>
+                </header>
 
                 <div class="glass rounded-2xl overflow-hidden shadow-xl border border-white/5">
                     <table class="w-full text-left border-collapse">
@@ -379,6 +355,72 @@
                     </table>
                     <div id="tasksEmpty" class="hidden p-12 text-center text-slate-500">
                         <p>No tasks in the queue.</p>
+                    </div>
+                    <!-- Pagination Footer -->
+                    <div id="tasksPagination" class="px-6 py-4 bg-white/5 border-t border-white/10 flex items-center justify-between">
+                        <div class="text-sm text-slate-400">
+                            Showing page <span id="pageNum" class="text-white font-medium">1</span> of <span id="totalPagesNum" class="text-white font-medium">1</span>
+                        </div>
+                        <div class="flex gap-2">
+                            <button id="prevPageBtn" onclick="changePage(-1)" class="px-4 py-2 bg-slate-800 border border-slate-600 rounded text-sm text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed">Previous</button>
+                            <button id="nextPageBtn" onclick="changePage(1)" class="px-4 py-2 bg-slate-800 border border-slate-600 rounded text-sm text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed">Next</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Side Drawer for New Scan -->
+                <div id="drawerOverlay" class="drawer-overlay fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex justify-end">
+                    <div id="drawerContent" class="drawer-content w-full max-w-lg h-full bg-slate-900 border-l border-white/10 shadow-2xl overflow-y-auto p-8">
+                        <div class="flex items-center justify-between mb-8">
+                            <h3 class="text-2xl font-bold text-white">Submit New Scan</h3>
+                            <button onclick="toggleDrawer(false)" class="p-2 text-slate-400 hover:text-white transition-colors">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+
+                        <form id="newTaskForm" class="space-y-6">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-400 mb-2">Task Label</label>
+                                <input type="text" id="taskLabel" placeholder="My New Scan"
+                                    class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-cyan-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-400 mb-2">Description</label>
+                                <input type="text" id="taskDesc" placeholder="Optional description"
+                                    class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-cyan-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-400 mb-2">Target(s) (ASN, CIDR, Range or IP)</label>
+                                <textarea id="taskTarget" placeholder="AS13335&#10;1.1.1.0/24&#10;8.8.8.8" required
+                                    class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-cyan-500 font-mono h-40"></textarea>
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-400 mb-2">Scan Ports</label>
+                                    <input type="text" id="taskPorts" placeholder="443,2053"
+                                        class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-cyan-500">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-400 mb-2">Worker Count</label>
+                                    <input type="number" id="taskWorkers" placeholder="10" min="1" max="100"
+                                        class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-cyan-500">
+                                </div>
+                            </div>
+                            <div class="pt-4">
+                                <label class="flex items-center gap-3 cursor-pointer group">
+                                    <div class="relative">
+                                        <input type="checkbox" id="taskSpeedtest" class="sr-only peer" checked>
+                                        <div class="w-12 h-6 bg-slate-700 rounded-full peer peer-checked:bg-cyan-500 transition-all"></div>
+                                        <div class="absolute left-1 top-1 w-4 h-4 bg-white rounded-full peer-checked:translate-x-6 transition-all"></div>
+                                    </div>
+                                    <span class="text-sm font-medium text-slate-300 group-hover:text-white">Enable Scan Speedtest</span>
+                                </label>
+                            </div>
+                            <button type="submit" class="w-full py-4 mt-8 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-xl shadow-lg shadow-cyan-500/20 transition-all active:scale-95 flex items-center justify-center gap-2">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                                Launch Distributed Scan
+                            </button>
+                        </form>
                     </div>
                 </div>
             </div>`;
@@ -493,7 +535,7 @@
                                 <input type="text" id="tgTestMsg" value="Hello from Discfscan Control Panel!" required
                                     class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-purple-400">
                             </div>
-                            <button type="submit" class="w-full py-2.5 bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-400 hover:to-indigo-500 text-white font-medium rounded-lg transition-all active:scale-95">Send Test Message</button>
+                            <button type="submit" class="w-full py-2.5 bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-400 hover:to-indigo-500 text-white font-medium rounded-lg transition-all active:scale-95">Save & Send Test Message</button>
                         </form>
                     </div>
                 </div>
@@ -646,9 +688,39 @@
         }
 
         async function initTasksLogic() {
+            window.toggleDrawer = (visible) => {
+                const overlay = $('drawerOverlay');
+                const content = $('drawerContent');
+                if (visible) {
+                    overlay.classList.add('active');
+                    content.classList.add('active');
+                } else {
+                    overlay.classList.remove('active');
+                    content.classList.remove('active');
+                }
+            };
+
+            window.changePage = (dir) => {
+                const newPage = state.tasksPage + dir;
+                if (newPage > 0 && newPage <= state.tasksTotalPages) {
+                    state.tasksPage = newPage;
+                    refreshTasks();
+                }
+            };
+
             const refreshTasks = async () => {
                 try {
-                    const tasks = await fetchAPI(API.tasks);
+                    const data = await fetchAPI(`${API.tasks}?page=${state.tasksPage}&limit=${state.tasksLimit}`);
+                    state.tasksTotal = data.total;
+                    state.tasksTotalPages = data.total_pages;
+
+                    // Update Pagination UI
+                    $('pageNum').innerText = state.tasksPage;
+                    $('totalPagesNum').innerText = state.tasksTotalPages || 1;
+                    $('prevPageBtn').disabled = state.tasksPage <= 1;
+                    $('nextPageBtn').disabled = state.tasksPage >= state.tasksTotalPages;
+
+                    const tasks = data.tasks;
                     const tbody = $('tasksTableBody');
                     tbody.innerHTML = '';
                     if (tasks.length === 0) {
@@ -685,7 +757,7 @@
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400 font-mono">
                                 ${t.ip_count > 0 ? t.ip_count.toLocaleString() : (t.status === 'pending' ? '...' : '-')}
                             </td>
-                            <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400">${t.target}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400 max-w-xs truncate" title="${t.target}">${t.target}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400 font-mono">${t.workers || '-'}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400">${new Date(t.created_at).toLocaleString()}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400">${t.completed_at ? new Date(t.completed_at).toLocaleString() : '-'}</td>
@@ -725,6 +797,8 @@
                     try {
                         await fetchAPI(API.tasks, 'POST', payload);
                         taskForm.reset();
+                        toggleDrawer(false); // Close drawer
+                        state.tasksPage = 1; // Reset to first page
                         refreshTasks();
                     } catch (err) { alert('Failed to submit task: ' + err.message); }
                 };
@@ -754,6 +828,9 @@
                 try {
                     const st = await fetchAPI(API.tgStatus);
                     $('tgTokenInput').value = st.token || '';
+                    if (st.test_chat_id) $('tgTestID').value = st.test_chat_id;
+                    if (st.test_message) $('tgTestMsg').value = st.test_message;
+
                     const badge = $('tgStatusBadge');
                     if (st.is_running) {
                         badge.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-green-500/20 text-green-400 border border-green-500/50 shadow-[0_0_10px_rgba(34,197,94,0.2)]';

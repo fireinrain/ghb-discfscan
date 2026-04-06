@@ -79,6 +79,10 @@ func initDB() (*gorm.DB, error) {
 	return db, nil
 }
 
+func NewStoreWithDB(db *gorm.DB) *Store {
+	return &Store{db: db}
+}
+
 func NewStore() (*Store, error) {
 	db, err := initDB()
 	if err != nil {
@@ -264,11 +268,22 @@ func (s *Store) GetNextRunningTask() *ScanTask {
 	return &task
 }
 
-// ListTasks returns all tasks ordered by sort_order then created_at.
-func (s *Store) ListTasks() ([]ScanTask, error) {
+// ListTasksPaged returns tasks for a specific page plus the total count.
+func (s *Store) ListTasksPaged(page, pageSize int) ([]ScanTask, int64, error) {
 	var tasks []ScanTask
-	res := s.db.Order("sort_order ASC, created_at ASC").Find(&tasks)
-	return tasks, res.Error
+	var total int64
+
+	// Count total first
+	s.db.Model(&ScanTask{}).Count(&total)
+
+	// Fetch page (Order by status: running first, then sort_order, then created_at desc for history)
+	// Actually let's do: running/pending by sort_order, completed/failed by created_at desc
+	res := s.db.Order("CASE WHEN status = 'running' THEN 0 WHEN status = 'pending' THEN 1 ELSE 2 END ASC, created_at DESC").
+		Offset((page - 1) * pageSize).
+		Limit(pageSize).
+		Find(&tasks)
+
+	return tasks, total, res.Error
 }
 
 // SetTaskIPCount updates the total number of IPs for a task.

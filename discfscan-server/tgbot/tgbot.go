@@ -3,6 +3,7 @@ package tgbot
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ func (m *TGBotManager) Start(token string) error {
 		m.bot.Stop()
 	}
 
+	token = strings.TrimSpace(token)
 	if token == "" {
 		return fmt.Errorf("empty token provided")
 	}
@@ -45,6 +47,7 @@ func (m *TGBotManager) Start(token string) error {
 
 	b, err := tele.NewBot(pref)
 	if err != nil {
+		log.Printf("Telegram bot initialization failed using token [%s...]: %v", token[:4], err)
 		return err
 	}
 
@@ -119,7 +122,7 @@ func (m *TGBotManager) registerRoutes() {
 		}
 	})
 
-	m.bot.Handle("/run", func(c tele.Context) error {
+	m.bot.Handle("/scan", func(c tele.Context) error {
 		args := c.Args()
 		if len(args) < 2 {
 			return c.Reply("用法: /run <task_type> <target> [port] [speedtest] [workers]")
