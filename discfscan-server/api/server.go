@@ -316,10 +316,7 @@ func (s *APIServer) handleTriggerScan(c echo.Context) error {
 		req.Port = "443,2053,2083,2087,2096,8443"
 	}
 	if req.Speedtest == "" {
-		req.Speedtest = s.store.GetConfig("default_speedtest")
-	}
-	if req.Speedtest == "" {
-		req.Speedtest = "false"
+		req.Speedtest = "true"
 	}
 
 	if req.Target == "" {

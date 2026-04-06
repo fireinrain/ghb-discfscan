@@ -75,10 +75,7 @@ func (d *GitHubDispatcher) TriggerAction(taskType, target, port, speedtest, work
 		port = "443,2053,2083,2087,2096,8443"
 	}
 	if speedtest == "" {
-		speedtest = d.Store.GetConfig("default_speedtest")
-	}
-	if speedtest == "" {
-		speedtest = "false"
+		speedtest = "true"
 	}
 	if taskType == "" {
 		taskType = "scan"
@@ -93,18 +90,22 @@ func (d *GitHubDispatcher) TriggerAction(taskType, target, port, speedtest, work
 	}
 
 	// Count total IPs across all targets
-	targets := parseCIDRList(target)
+	targets, err := parseCIDRList(target)
+	if err != nil {
+		return fmt.Errorf("failed to parse targets: %w", err)
+	}
 	totalIPs := countTotalIPs(targets)
 
+	// Record the total IPs in the database
+	_ = d.Store.SetTaskIPCount(taskID, totalIPs)
+
 	// Decide actual worker count based on IP volume
+	// Decide actual worker count based on IP volume (unless overridden)
 	actualWorkers := decideWorkerCount(totalIPs, defaultWorkerCount)
 	if workersOverride != "" {
-		// caller explicitly set a workers count/array — use it as the cap
 		trimmed := strings.TrimSpace(workersOverride)
-		if !strings.HasPrefix(trimmed, "[") {
-			if n, err := strconv.Atoi(trimmed); err == nil && n > 0 {
-				actualWorkers = n
-			}
+		if n, err := strconv.Atoi(trimmed); err == nil && n > 0 {
+			actualWorkers = n
 		}
 	}
 
@@ -194,17 +195,86 @@ func (d *GitHubDispatcher) TriggerAction(taskType, target, port, speedtest, work
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-// parseCIDRList splits a comma-separated list of CIDRs/IPs into individual entries.
-func parseCIDRList(target string) []string {
-	parts := strings.Split(target, ",")
+// resolveASN fetches IPv4 announced prefixes for a given AS number (e.g. AS13335).
+func resolveASN(asn string) ([]string, error) {
+	// Clean the prefix
+	asn = strings.ToUpper(strings.TrimPrefix(strings.TrimSpace(asn), "AS"))
+	if asn == "" {
+		return nil, fmt.Errorf("invalid ASN format")
+	}
+
+	url := fmt.Sprintf("https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS%s", asn)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("RIPE Stat API returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Data struct {
+			Prefixes []struct {
+				Prefix string `json:"prefix"`
+			} `json:"prefixes"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	var cidrs []string
+	for _, p := range result.Data.Prefixes {
+		// Only keep IPv4 for now as the scanner logic is IPv4-centric
+		if strings.Contains(p.Prefix, ":") {
+			continue
+		}
+		cidrs = append(cidrs, p.Prefix)
+	}
+	return cidrs, nil
+}
+
+// parseCIDRList splits and normalizes a list of CIDRs, IPs, or ASNs.
+func parseCIDRList(target string) ([]string, error) {
+	// Replace newlines with commas then split
+	normalized := strings.ReplaceAll(target, "\n", ",")
+	parts := strings.Split(normalized, ",")
+
 	var out []string
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
-		if p != "" {
+		if p == "" {
+			continue
+		}
+
+		// Handle AS Numbers (AS13335, as13335, 13335? No, let's stick to AS prefix)
+		if strings.HasPrefix(strings.ToUpper(p), "AS") {
+			prefixes, err := resolveASN(p)
+			if err != nil {
+				// We log but continue for other targets? Or fail? Let's fail for integrity.
+				return nil, fmt.Errorf("failed to resolve %s: %w", p, err)
+			}
+			out = append(out, prefixes...)
+			continue
+		}
+
+		// Handle existing CIDRs or raw IPs
+		if strings.Contains(p, "/") || strings.Contains(p, "-") {
 			out = append(out, p)
+		} else {
+			// If it's a valid IP, turn into CIDR /32
+			if ip := net.ParseIP(p); ip != nil {
+				out = append(out, p+"/32")
+			} else {
+				// Could be some other format or invalid, keep as is for countTotalIPs to figure out
+				out = append(out, p)
+			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // countTotalIPs totals the number of usable IPs across all targets.

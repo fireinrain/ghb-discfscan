@@ -238,11 +238,20 @@
                                 class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-slate-300 mb-1">Default Worker Count</label>
+                            <label class="block text-sm font-medium text-slate-300 mb-1">Default Global Worker Cap</label>
                             <input type="number" id="githubWorkers" placeholder="10" min="1" max="100"
                                 class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400">
-                            <p class="text-xs text-slate-500 mt-2">Example: 10 will generate [1,2,3...10]</p>
+                            <p class="text-xs text-slate-500 mt-2">Maximum parallel GitHub runners to spawn by default.</p>
                         </div>
+                        <div>
+                            <label class="flex items-center gap-2 cursor-pointer group mt-4">
+                                <div class="relative">
+                                    <input type="checkbox" id="defaultSpeedtest" class="sr-only peer" checked>
+                                    <div class="w-10 h-5 bg-slate-700 rounded-full peer peer-checked:bg-cyan-500 transition-all"></div>
+                                    <div class="absolute left-1 top-1 w-3 h-3 bg-white rounded-full peer-checked:translate-x-5 transition-all"></div>
+                                </div>
+                                <span class="text-sm font-medium text-slate-300 group-hover:text-white">Enable Speedtest by Default</span>
+                            </label>
                         </div>
                     </form>
                 </div>
@@ -278,13 +287,6 @@
                             <input type="text" id="defaultPorts" placeholder="443,2053,2083,2087,2096,8443"
                                 class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-green-400 focus:ring-1 focus:ring-green-400">
                             <p class="text-xs text-slate-500 mt-1">Comma-separated. Used when the caller doesn't specify ports.Support all masscan ports format</p>
-                        </div>
-                        <div class="flex items-center gap-4">
-                            <label class="text-sm font-medium text-slate-300">Speedtest by Default</label>
-                            <select id="defaultSpeedtest" class="bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-green-400 focus:ring-1 focus:ring-green-400 cursor-pointer">
-                                <option value="false">Disabled</option>
-                                <option value="true">Enabled</option>
-                            </select>
                         </div>
                     </div>
                 </div>
@@ -322,10 +324,11 @@
                             <input type="text" id="taskDesc" placeholder="Description of this scan"
                                 class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
                         </div>
-                        <div>
-                            <label class="block text-sm font-medium text-slate-400 mb-1">Target(s) (CIDR or Range)</label>
-                            <input type="text" id="taskTarget" placeholder="1.0.0.0/24, 2.0.0.0-2.0.0.255" required
-                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400">
+                        <div class="md:col-span-2 lg:col-span-3">
+                            <label class="block text-sm font-medium text-slate-400 mb-1">Target(s) (ASN, CIDR, Range or IP)</label>
+                            <textarea id="taskTarget" placeholder="AS13335 (Resolves to Cloudflare prefixes)&#10;1.1.1.0/24&#10;8.8.8.8, 1.0.0.0-1.0.0.255" required
+                                class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-400 font-mono h-32"></textarea>
+                            <p class="text-[11px] text-slate-500 mt-1">Supports multi-line, AS Numbers (e.g. AS13335), and automatic /32 conversion for single IPs.</p>
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-slate-400 mb-1">Scan Ports</label>
@@ -340,7 +343,7 @@
                         <div class="flex items-center gap-4 pt-6">
                             <label class="flex items-center gap-2 cursor-pointer group">
                                 <div class="relative">
-                                    <input type="checkbox" id="taskSpeedtest" class="sr-only peer">
+                                    <input type="checkbox" id="taskSpeedtest" class="sr-only peer" checked>
                                     <div class="w-10 h-5 bg-slate-700 rounded-full peer peer-checked:bg-cyan-500 transition-all"></div>
                                     <div class="absolute left-1 top-1 w-3 h-3 bg-white rounded-full peer-checked:translate-x-5 transition-all"></div>
                                 </div>
@@ -362,6 +365,7 @@
                                 <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Status</th>
                                 <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Label / Description</th>
                                 <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Progress</th>
+                                <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Total IPs</th>
                                 <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Target</th>
                                 <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Workers</th>
                                 <th class="px-6 py-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Created At</th>
@@ -418,13 +422,14 @@
                     <div class="bg-black/50 p-4 rounded-lg border border-slate-700 overflow-x-auto">
                         <pre class="text-sm font-mono text-cyan-300">curl -X POST http://&lt;Server IP&gt;:9999/api/scan \
   -H "Authorization: Bearer &lt;Your Token Secret&gt;" \
-  -H "Content-Type: application/json" \\
-   -d '{
-     "target": "1.1.1.0/24",
-     "port": "443,8443",
-     "speedtest": "true",
-     "workers": "[1,2,3,4,5,6,7,8,9,10]"
-   }'</pre>
+  -H "Content-Type: application/json" \
+  -d '{
+    "label": "External API Scan",
+    "target": "1.1.1.0/24",
+    "port": "443,2053,2087",
+    "speedtest": "true",
+    "workers": "10"
+  }'</pre>
                     </div>
                 </div>
 
@@ -594,7 +599,7 @@
                     $('redisPort').value = data.redis_port || '';
                     $('redisPass').value = data.redis_pass || '';
                     $('defaultPorts').value = data.default_ports || '443,2053,2083,2087,2096,8443';
-                    $('defaultSpeedtest').value = data.default_speedtest || 'false';
+                    $('defaultSpeedtest').checked = (data.default_speedtest === 'true');
                 } catch (e) { }
 
                 $('dashConfigForm').addEventListener('submit', async (e) => {
@@ -608,7 +613,7 @@
                             redis_port: $('redisPort').value,
                             redis_pass: $('redisPass').value,
                             default_ports: $('defaultPorts').value,
-                            default_speedtest: $('defaultSpeedtest').value
+                            default_speedtest: $('defaultSpeedtest').checked ? 'true' : 'false'
                         });
                         alert('✅ Configuration saved successfully!');
                     } catch (err) { alert('Save failed: ' + err.message); }
@@ -677,6 +682,8 @@
                                     <div class="bg-cyan-500 h-full transition-all duration-500" style="width: ${t.progress}%"></div>
                                 </div>
                                 <div class="text-[10px] text-slate-500 mt-1">${t.progress}% complete</div>
+                            <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400 font-mono">
+                                ${t.ip_count > 0 ? t.ip_count.toLocaleString() : (t.status === 'pending' ? '...' : '-')}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400">${t.target}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400 font-mono">${t.workers || '-'}</td>

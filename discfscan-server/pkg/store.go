@@ -59,6 +59,7 @@ type ScanTask struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 	StartedAt   *time.Time `json:"started_at"`
 	CompletedAt *time.Time `json:"completed_at"`
+	IPCount     int        `json:"ip_count"`
 }
 
 type Store struct {
@@ -268,6 +269,11 @@ func (s *Store) ListTasks() ([]ScanTask, error) {
 	var tasks []ScanTask
 	res := s.db.Order("sort_order ASC, created_at ASC").Find(&tasks)
 	return tasks, res.Error
+}
+
+// SetTaskIPCount updates the total number of IPs for a task.
+func (s *Store) SetTaskIPCount(id uint, count int) error {
+	return s.db.Model(&ScanTask{}).Where("id = ?", id).Update("ip_count", count).Error
 }
 
 // DeleteTask removes a task record only if it is not currently running.
