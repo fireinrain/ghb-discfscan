@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -30,6 +33,18 @@ func startHeartbeat(rdb *redis.Client, taskID uint, workerID int) {
 			<-ticker.C
 		}
 	}()
+}
+
+func countIPs(cidr string) int {
+	if !strings.Contains(cidr, "/") {
+		return 1
+	}
+	parts := strings.Split(cidr, "/")
+	if len(parts) != 2 {
+		return 1
+	}
+	mask, _ := strconv.Atoi(parts[1])
+	return int(math.Pow(2, float64(32-mask)))
 }
 
 func main() {
@@ -89,23 +104,77 @@ func main() {
 	rangesKey := fmt.Sprintf("task:worker:%d:%d:ranges", *taskIDFlag, *workerID)
 
 	for {
-		// Fetch next CIDR range from list
-		target, err := rdb.LPop(ctx, rangesKey).Result()
-		if err == redis.Nil {
-			break // No more work
+		// A. Fetch Batch Size from Redis (fallback to 100k)
+		batchSize := 100000
+		if val, err := rdb.Get(ctx, "config:worker_batch_size").Result(); err == nil {
+			if n, err := strconv.Atoi(val); err == nil && n > 0 {
+				batchSize = n
+			}
 		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Redis error pulling range: %v\n", err)
+
+		// B. Inspect the queue
+		allTargets, err := rdb.LRange(ctx, rangesKey, 0, -1).Result()
+		if err != nil || len(allTargets) == 0 {
 			break
 		}
 
-		fmt.Printf("[Worker %d] Scanning: %s\n", *workerID, target)
+		// C. Calculate total IPs available
+		totalIPs := 0
+		for _, t := range allTargets {
+			totalIPs += countIPs(t)
+		}
 
-		// --- STUB: Actual scan logic ---
-		time.Sleep(3 * time.Second)
-		// -------------------------------
+		// D. Determine how many CIDR items to pick
+		var pickCount int
+		if totalIPs <= batchSize {
+			// Case 1: Small task - pick half of the items (minimum 1)
+			pickCount = (len(allTargets) + 1) / 2
+		} else {
+			// Case 2: Large task - pick items until we reach the batch size limit
+			cumulativeIPs := 0
+			for i, t := range allTargets {
+				cumulativeIPs += countIPs(t)
+				pickCount = i + 1
+				if cumulativeIPs >= batchSize {
+					break
+				}
+			}
+		}
 
-		fmt.Printf("[Worker %d] Finished: %s\n", *workerID, target)
+		// E. Pop the batch one by one to keep progress bar smooth
+		batch := []string{}
+		for i := 0; i < pickCount; i++ {
+			t, err := rdb.LPop(ctx, rangesKey).Result()
+			if err != nil {
+				break
+			}
+			batch = append(batch, t)
+		}
+
+		if len(batch) == 0 {
+			break
+		}
+
+		batchIPs := 0
+		for _, t := range batch {
+			batchIPs += countIPs(t)
+		}
+
+		fmt.Printf("[Worker %d] Starting batch of %d CIDR(s) (~%d IPs)\n", *workerID, len(batch), batchIPs)
+
+		// F. Process the batch (In a real implementation, you might pass all targets to one masscan call)
+		for _, target := range batch {
+			fmt.Printf("[Worker %d] Scanning: %s\n", *workerID, target)
+
+			// --- STUB: Actual scan logic ---
+			// If you were using masscan here, you could join the batch targets.
+			time.Sleep(3 * time.Second)
+			// -------------------------------
+
+			fmt.Printf("[Worker %d] Finished: %s\n", *workerID, target)
+		}
+
+		fmt.Printf("[Worker %d] Batch complete.\n", *workerID)
 	}
 
 	fmt.Printf("[Worker %d] All assigned ranges complete.\n", *workerID)

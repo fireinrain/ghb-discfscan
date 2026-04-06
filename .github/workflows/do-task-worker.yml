@@ -4,12 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       workers:
-        description: "Worker array, e.g. [1,2,3,4,5]"
+        description: "Worker array, e.g. [1,2,3]"
         required: false
         default: "[1,2,3,4,5,6,7,8,9,10]"
       task_id:
         description: "The ID of the scan task in the database"
         required: true
+
+# ✅ 防止重复任务把你打爆
+concurrency:
+  group: worker-${{ github.event.inputs.task_id }}
+  cancel-in-progress: false
 
 jobs:
   worker:
@@ -17,33 +22,38 @@ jobs:
 
     strategy:
       fail-fast: false
+      max-parallel: 20   # 🔥 控制并发（非常重要）
       matrix:
-        worker_id: ${{ fromJson(github.event.inputs.workers) }}
+        worker_id: ${{ fromJson(github.event.inputs.workers || '[1]') }}
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Print Inputs
+        run: |
+          echo "Workers: ${{ github.event.inputs.workers }}"
+          echo "Task ID: ${{ github.event.inputs.task_id }}"
 
-      - uses: actions/setup-go@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
         with:
           go-version: '1.21'
-
-      - name: Cache Go modules
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-
+          cache: true   # ✅ 官方内置缓存（比 actions/cache 简洁）
       - name: Init Go Modules
-        run: go mod tidy && go mod download
+        run: |
+          go mod tidy
+          go mod download
 
       - name: Run Worker
         env:
           REDIS_HOST: ${{ secrets.REDIS_HOST }}
           REDIS_PORT: ${{ secrets.REDIS_PORT }}
           REDIS_PASS: ${{ secrets.REDIS_PASS }}
+          WORKER_ID: ${{ matrix.worker_id }}
+          TASK_ID: ${{ github.event.inputs.task_id }}
         run: |
-          go run main.go --worker=${{ matrix.worker_id }} --task=${{ github.event.inputs.task_id }}
+          echo "🚀 Start worker $WORKER_ID for task $TASK_ID"
+          go run main.go --worker=$WORKER_ID --task=$TASK_ID
+
+      - name: Worker Done
+        if: always()
+        run: echo "✅ Worker ${{ matrix.worker_id }} finished"

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/labstack/gommon/log"
 )
 
 var rctx = context.Background()
@@ -27,7 +29,7 @@ type GitHubDispatcher struct {
 func NewGitHubDispatcher(store *Store) *GitHubDispatcher {
 	return &GitHubDispatcher{
 		Store: store,
-		Ref:   "main",
+		Ref:   "master",
 	}
 }
 
@@ -90,18 +92,18 @@ func (d *GitHubDispatcher) TriggerAction(taskType, target, port, speedtest, work
 	}
 
 	// Count total IPs across all targets
-	targets, err := parseCIDRList(target)
+	targets, err := ParseCIDRList(target)
 	if err != nil {
+		log.Errorf("[Dispatcher] Target parsing failed (Task %d): %v", taskID, err)
 		return fmt.Errorf("failed to parse targets: %w", err)
 	}
-	totalIPs := countTotalIPs(targets)
+	totalIPs := CountTotalIPs(targets)
 
-	// Record the total IPs in the database
+	// Record the total IPs in the database (redundant but safe)
 	_ = d.Store.SetTaskIPCount(taskID, totalIPs)
 
-	// Decide actual worker count based on IP volume
 	// Decide actual worker count based on IP volume (unless overridden)
-	actualWorkers := decideWorkerCount(totalIPs, defaultWorkerCount)
+	actualWorkers := DecideWorkerCount(totalIPs, defaultWorkerCount)
 	if workersOverride != "" {
 		trimmed := strings.TrimSpace(workersOverride)
 		if n, err := strconv.Atoi(trimmed); err == nil && n > 0 {
@@ -109,8 +111,11 @@ func (d *GitHubDispatcher) TriggerAction(taskType, target, port, speedtest, work
 		}
 	}
 
-	// Split targets into actualWorkers sub-ranges
-	ranges := splitIntoRanges(targets, actualWorkers)
+	// Record final worker count in database (redundant but safe)
+	_ = d.Store.SetTaskWorkersCount(taskID, actualWorkers)
+
+	// Split targets into actualWorkers CIDR buckets
+	buckets := splitIntoCIDRBuckets(targets, actualWorkers)
 
 	// Context for Redis
 	rctx := context.Background()
@@ -118,10 +123,12 @@ func (d *GitHubDispatcher) TriggerAction(taskType, target, port, speedtest, work
 	// Push tasks to Redis
 	rdb, err := d.NewRedisClient()
 	if err != nil {
+		log.Errorf("[Dispatcher] Redis connection failed for task %d: %v", taskID, err)
 		return fmt.Errorf("redis connection failed: %w", err)
 	}
 
-	for i, tgt := range ranges {
+	totalChunks := 0
+	for i, cidrs := range buckets {
 		workerID := i + 1
 
 		// 1. Store worker metadata (info)
@@ -135,22 +142,22 @@ func (d *GitHubDispatcher) TriggerAction(taskType, target, port, speedtest, work
 		infoKey := fmt.Sprintf("task:worker:%d:%d:info", taskID, workerID)
 		rdb.Set(rctx, infoKey, string(infoData), 24*time.Hour)
 
-		// 2. Clear old ranges if any (shouldn't happen on fresh dispatch)
+		// 2. Clear old ranges if any
 		rangesKey := fmt.Sprintf("task:worker:%d:%d:ranges", taskID, workerID)
 		rdb.Del(rctx, rangesKey)
 
-		// 3. Push ranges to the list
-		// Current logic: splitIntoRanges gives one big string like "1.1.1.0-1.1.1.255".
-		// We'll push this as a single chunk for now, but the worker will LPOP it.
-		// Future improvement: split the big range into multiple CIDR chunks here.
-		if tgt != "" {
-			rdb.RPush(rctx, rangesKey, tgt)
+		// 3. Push CIDRs to the list
+		if len(cidrs) > 0 {
+			for _, c := range cidrs {
+				rdb.RPush(rctx, rangesKey, c)
+				totalChunks++
+			}
 		}
 	}
 
 	// 4. Store total chunks count for overall progress tracking
 	totalChunksKey := fmt.Sprintf("task:total_chunks:%d", taskID)
-	rdb.Set(rctx, totalChunksKey, len(ranges), 24*time.Hour)
+	rdb.Set(rctx, totalChunksKey, totalChunks, 24*time.Hour)
 
 	// Build workers array string e.g. "[1,2,3,...,N]"
 	nums := make([]string, actualWorkers)
@@ -187,9 +194,11 @@ func (d *GitHubDispatcher) TriggerAction(taskType, target, port, speedtest, work
 
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
+		log.Errorf("[Dispatcher] GitHub API failure (Task %d): status %d, body: %s", taskID, resp.StatusCode, string(body))
 		return fmt.Errorf("github api returned status %d: %s", resp.StatusCode, string(body))
 	}
 
+	log.Infof("[Dispatcher] Task %d successfully triggered with %d workers", taskID, actualWorkers)
 	return nil
 }
 
@@ -237,8 +246,7 @@ func resolveASN(asn string) ([]string, error) {
 	return cidrs, nil
 }
 
-// parseCIDRList splits and normalizes a list of CIDRs, IPs, or ASNs.
-func parseCIDRList(target string) ([]string, error) {
+func ParseCIDRList(target string) ([]string, error) {
 	// Replace newlines with commas then split
 	normalized := strings.ReplaceAll(target, "\n", ",")
 	parts := strings.Split(normalized, ",")
@@ -277,8 +285,7 @@ func parseCIDRList(target string) ([]string, error) {
 	return out, nil
 }
 
-// countTotalIPs totals the number of usable IPs across all targets.
-func countTotalIPs(targets []string) int {
+func CountTotalIPs(targets []string) int {
 	total := 0
 	for _, t := range targets {
 		if strings.Contains(t, "/") {
@@ -296,15 +303,14 @@ func countTotalIPs(targets []string) int {
 	return total
 }
 
-// decideWorkerCount returns the number of workers based on total IP count.
-func decideWorkerCount(totalIPs, defaultMax int) int {
+func DecideWorkerCount(totalIPs, defaultMax int) int {
 	switch {
 	case totalIPs > 100000:
 		return defaultMax
 	case totalIPs >= 50000:
-		return min(10, defaultMax)
+		return 10
 	case totalIPs >= 10000:
-		return min(5, defaultMax)
+		return 5
 	default:
 		return 1
 	}
@@ -317,116 +323,102 @@ func min(a, b int) int {
 	return b
 }
 
-// splitIntoRanges divides the combined IP space of all targets into n equal ranges.
-// Returns a slice of range strings like "1.0.0.0-1.0.3.255".
-func splitIntoRanges(targets []string, n int) []string {
-	// Collect all IP uint32 values from all targets
-	type ipRange struct{ start, end uint32 }
-	var allRanges []ipRange
+// splitIntoCIDRBuckets divides the target space into n buckets of CIDRs.
+func splitIntoCIDRBuckets(targets []string, n int) [][]string {
+	if n <= 1 {
+		return [][]string{targets}
+	}
+
+	// 1. Resolve all targets into a list of base CIDRs
+	var allCIDRs []string
 	totalIPs := 0
-
 	for _, t := range targets {
-		if strings.Contains(t, "/") {
-			_, ipNet, err := net.ParseCIDR(t)
-			if err != nil {
-				continue
-			}
-			start := ipToUint32(ipNet.IP.Mask(ipNet.Mask))
-			ones, bits := ipNet.Mask.Size()
-			count := int(math.Pow(2, float64(bits-ones)))
-			end := start + uint32(count) - 1
-			allRanges = append(allRanges, ipRange{start, end})
-			totalIPs += count
+		if strings.Contains(t, "-") {
+			// Convert "start-end" to CIDRs (fallback if needed)
+			allCIDRs = append(allCIDRs, t) // masscan can handle ranges, but user wants CIDRs
+			// For now, let's assume targets are already normalized as CIDRs or IPs by parseCIDRList
+		} else if strings.Contains(t, "/") {
+			allCIDRs = append(allCIDRs, t)
+			totalIPs += CountTotalIPs([]string{t})
 		} else {
-			ip := net.ParseIP(t).To4()
-			if ip == nil {
-				continue
-			}
-			u := ipToUint32(ip)
-			allRanges = append(allRanges, ipRange{u, u})
-			totalIPs++
+			allCIDRs = append(allCIDRs, t+"/32")
+			totalIPs += 1
 		}
 	}
 
-	if len(allRanges) == 0 {
-		// Fallback: return the original target as-is for worker 1
-		result := make([]string, n)
-		for i := range result {
-			result[i] = strings.Join(targets, ",")
-		}
-		return result
+	if totalIPs == 0 {
+		return make([][]string, n)
 	}
 
-	if n == 1 {
-		return []string{rangeToString(allRanges[0].start, allRanges[0].end)}
+	avgPerWorker := totalIPs / n
+	if avgPerWorker == 0 {
+		avgPerWorker = 1
 	}
 
-	chunkSize := totalIPs / n
-	if chunkSize == 0 {
-		chunkSize = 1
-	}
+	buckets := make([][]string, n)
+	currentWorker := 0
+	currentQuota := avgPerWorker
 
-	var result []string
-	remaining := 0
-	ri := 0
-	cur := allRanges[0].start
+	// Simple bucket filler
+	for _, c := range allCIDRs {
+		count := CountTotalIPs([]string{c})
 
-	for workerIdx := 0; workerIdx < n && ri < len(allRanges); workerIdx++ {
-		need := chunkSize
-		if workerIdx == n-1 {
-			// Last worker takes the rest
-			need = math.MaxInt32
-		}
-
-		chunkStart := cur
-		filled := 0
-
-		for filled < need && ri < len(allRanges) {
-			avail := int(allRanges[ri].end-cur) + 1
-			if avail <= 0 {
-				ri++
-				if ri < len(allRanges) {
-					cur = allRanges[ri].start
-				}
-				remaining = 0
-				continue
+		// While this CIDR is too big for the current worker's quota, split it
+		for count > currentQuota && currentWorker < n-1 {
+			// Split CIDR into two halves
+			half1, half2, err := splitCIDR(c)
+			if err != nil {
+				// Cannot split further (e.g. /32), just give it to the worker
+				buckets[currentWorker] = append(buckets[currentWorker], c)
+				currentWorker++
+				currentQuota = avgPerWorker
+				goto nextCIDR
 			}
 
-			take := need - filled
-			if take > avail {
-				take = avail
-			}
-			filled += take
-			if take == avail {
-				cur = allRanges[ri].end
-				ri++
-				if ri < len(allRanges) {
-					cur = allRanges[ri].start
-				}
-				remaining = 0
-			} else {
-				cur += uint32(take)
-				remaining = avail - take
-				_ = remaining
-			}
+			// Add first half to current worker and move to next
+			buckets[currentWorker] = append(buckets[currentWorker], half1)
+			c = half2
+			count = CountTotalIPs([]string{c})
+			currentWorker++
+			currentQuota = avgPerWorker
 		}
 
-		chunkEnd := cur - 1
-		if ri < len(allRanges) && cur > allRanges[ri].start {
-			chunkEnd = cur - 1
-		} else if ri > 0 {
-			chunkEnd = allRanges[ri-1].end
+		// Add remaining part to current worker
+		buckets[currentWorker] = append(buckets[currentWorker], c)
+		currentQuota -= count
+		if currentQuota <= 0 && currentWorker < n-1 {
+			currentWorker++
+			currentQuota = avgPerWorker
 		}
-
-		result = append(result, rangeToString(chunkStart, chunkEnd))
+	nextCIDR:
 	}
 
-	// Pad with empty entries if fewer ranges produced than workers requested
-	for len(result) < n {
-		result = append(result, result[len(result)-1])
+	return buckets
+}
+
+// splitCIDR splits a CIDR like /24 into two /25s.
+func splitCIDR(cidr string) (string, string, error) {
+	ip, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", "", err
+	}
+	ones, _ := ipNet.Mask.Size()
+	if ones >= 32 {
+		return "", "", fmt.Errorf("cannot split /32")
 	}
 
-	return result
+	// New mask is one bit larger
+	newOnes := ones + 1
+
+	// First half is the same start IP
+	h1 := fmt.Sprintf("%s/%d", ip.String(), newOnes)
+
+	// Second half is start IP + (2 ^ (32 - newOnes))
+	delta := uint32(math.Pow(2, float64(32-newOnes)))
+	u32 := ipToUint32(ip)
+	h2 := fmt.Sprintf("%s/%d", uint32ToIP(u32+delta).String(), newOnes)
+
+	return h1, h2, nil
 }
 
 func ipToUint32(ip net.IP) uint32 {
@@ -438,11 +430,4 @@ func uint32ToIP(n uint32) net.IP {
 	ip := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ip, n)
 	return ip
-}
-
-func rangeToString(start, end uint32) string {
-	if start == end {
-		return uint32ToIP(start).String()
-	}
-	return uint32ToIP(start).String() + "-" + uint32ToIP(end).String()
 }

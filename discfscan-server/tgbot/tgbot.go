@@ -2,10 +2,12 @@ package tgbot
 
 import (
 	"fmt"
-	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/labstack/gommon/log"
 
 	tele "gopkg.in/telebot.v3"
 
@@ -47,7 +49,7 @@ func (m *TGBotManager) Start(token string) error {
 
 	b, err := tele.NewBot(pref)
 	if err != nil {
-		log.Printf("Telegram bot initialization failed using token [%s...]: %v", token[:4], err)
+		log.Errorf("[TGBot] Initialization failed using token [%s...]: %v", token[:4], err)
 		return err
 	}
 
@@ -55,7 +57,7 @@ func (m *TGBotManager) Start(token string) error {
 	m.registerRoutes()
 
 	go func() {
-		log.Println("Telegram bot is starting...")
+		log.Info("Telegram bot is starting...")
 		b.Start()
 	}()
 
@@ -69,7 +71,7 @@ func (m *TGBotManager) Stop() {
 		m.bot.Stop()
 		m.bot = nil
 	}
-	log.Println("Telegram bot stopped.")
+	log.Info("Telegram bot stopped.")
 }
 
 func (m *TGBotManager) IsRunning() bool {
@@ -114,7 +116,7 @@ func (m *TGBotManager) registerRoutes() {
 
 			// Validate if the specific Sender/User natively has this permission in this Chat
 			if !m.store.VerifyTGCommand(sender.ID, chat.ID, cmd) {
-				log.Printf("Blocked unauthorized execution attempt: UserID=%d, ChatID=%d, Command=%s", sender.ID, chat.ID, cmd)
+				log.Infof("[TGBot] Blocked unauthorized execution attempt: UserID=%d, ChatID=%d, Command=%s", sender.ID, chat.ID, cmd)
 				return nil // Drop silently to prevent spam
 			}
 
@@ -145,12 +147,30 @@ func (m *TGBotManager) registerRoutes() {
 
 		label := "Telegram Task"
 		desc := "Triggered by Telegram User"
-		task, err := m.store.CreateTask(label, desc, taskType, target, port, speedtest, workers)
+
+		// Pre-calculate IP and Worker Counts
+		targets, _ := pkg.ParseCIDRList(target)
+		ipCount := pkg.CountTotalIPs(targets)
+
+		defaultMaxStr := m.store.GetConfig("github_workers")
+		defaultMax := 10
+		if n, err := strconv.Atoi(defaultMaxStr); err == nil && n > 0 {
+			defaultMax = n
+		}
+		workerCount := pkg.DecideWorkerCount(ipCount, defaultMax)
+		if workers != "" {
+			if n, err := strconv.Atoi(workers); err == nil && n > 0 {
+				workerCount = n
+			}
+		}
+
+		task, err := m.store.CreateTask(label, desc, taskType, target, port, speedtest, workers, ipCount, workerCount)
 		if err != nil {
-			log.Println("Task Creation Error:", err)
+			log.Errorf("[TGBot] Task creation failed: %v", err)
 			return c.Reply("❌ 创建扫描任务失败: " + err.Error())
 		}
 
+		log.Infof("[TGBot] Task %d created via Telegram by %s", task.ID, c.Sender().Username)
 		return c.Reply(fmt.Sprintf("✅ 扫描任务已加入队列!\nID: %d\n目标: %s\n状态: 待处理 (Pending)", task.ID, target))
 	})
 

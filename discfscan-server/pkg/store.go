@@ -11,6 +11,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+
+	"github.com/labstack/gommon/log"
 )
 
 type Token struct {
@@ -44,22 +46,23 @@ type TGRule struct {
 
 // ScanTask represents a queued scan job.
 type ScanTask struct {
-	ID          uint       `gorm:"primaryKey" json:"id"`
-	Label       string     `json:"label"`
-	Description string     `json:"description"`
-	TaskType    string     `gorm:"default:scan" json:"task_type"`
-	Target      string     `json:"target"`
-	Port        string     `json:"port"`
-	Speedtest   string     `gorm:"default:false" json:"speedtest"`
-	Workers     string     `json:"workers"`                       // optional override
-	Progress    int        `gorm:"default:0" json:"progress"`     // 0-100
-	Status      string     `gorm:"default:pending" json:"status"` // pending | running | completed | failed | cancelled
-	SortOrder   int        `gorm:"index" json:"sort_order"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	StartedAt   *time.Time `json:"started_at"`
-	CompletedAt *time.Time `json:"completed_at"`
-	IPCount     int        `json:"ip_count"`
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	Label        string     `json:"label"`
+	Description  string     `json:"description"`
+	TaskType     string     `gorm:"default:scan" json:"task_type"`
+	Target       string     `json:"target"`
+	Port         string     `json:"port"`
+	Speedtest    string     `gorm:"default:false" json:"speedtest"`
+	Workers      string     `json:"workers"`                       // optional override
+	Progress     int        `gorm:"default:0" json:"progress"`     // 0-100
+	Status       string     `gorm:"default:pending" json:"status"` // pending | running | completed | failed | cancelled
+	SortOrder    int        `gorm:"index" json:"sort_order"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	StartedAt    *time.Time `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at"`
+	IPCount      int        `json:"ip_count"`
+	WorkersCount int        `json:"workers_count"`
 }
 
 type Store struct {
@@ -69,11 +72,13 @@ type Store struct {
 func initDB() (*gorm.DB, error) {
 	db, err := gorm.Open(sqlite.Open("tokens.db"), &gorm.Config{})
 	if err != nil {
+		log.Errorf("[Store] Database connection failed: %v", err)
 		return nil, err
 	}
 	// Auto Migrate the schema
 	err = db.AutoMigrate(&Token{}, &Config{}, &Admin{}, &TGRule{}, &ScanTask{})
 	if err != nil {
+		log.Errorf("[Store] Database migration failed: %v", err)
 		return nil, err
 	}
 	return db, nil
@@ -92,6 +97,10 @@ func NewStore() (*Store, error) {
 
 	if err := s.EnsureDefaultAdmin(); err != nil {
 		return nil, err
+	}
+
+	if s.GetConfig("worker_batch_size") == "" {
+		s.SetConfig("worker_batch_size", "100000")
 	}
 
 	return s, nil
@@ -237,22 +246,24 @@ func (s *Store) VerifyTGCommand(userID int64, chatID int64, cmd string) bool {
 var ErrTaskNotPending = errors.New("task is not in pending state")
 
 // CreateTask adds a new scan task to the end of the queue.
-func (s *Store) CreateTask(label, desc, taskType, target, port, speedtest, workers string) (*ScanTask, error) {
+func (s *Store) CreateTask(label, desc, taskType, target, port, speedtest, workers string, ipCount, workersCount int) (*ScanTask, error) {
 	// Find the current max sort_order for pending tasks
 	var maxOrder int
 	s.db.Model(&ScanTask{}).Select("COALESCE(MAX(sort_order), 0)").Scan(&maxOrder)
 
 	task := &ScanTask{
-		Label:       label,
-		Description: desc,
-		TaskType:    taskType,
-		Target:      target,
-		Port:        port,
-		Speedtest:   speedtest,
-		Workers:     workers,
-		Status:      "pending",
-		SortOrder:   maxOrder + 1,
-		CreatedAt:   time.Now(),
+		Label:        label,
+		Description:  desc,
+		TaskType:     taskType,
+		Target:       target,
+		Port:         port,
+		Speedtest:    speedtest,
+		Workers:      workers,
+		Status:       "pending",
+		SortOrder:    maxOrder + 1,
+		CreatedAt:    time.Now(),
+		IPCount:      ipCount,
+		WorkersCount: workersCount,
 	}
 	res := s.db.Create(task)
 	return task, res.Error
@@ -289,6 +300,20 @@ func (s *Store) ListTasksPaged(page, pageSize int) ([]ScanTask, int64, error) {
 // SetTaskIPCount updates the total number of IPs for a task.
 func (s *Store) SetTaskIPCount(id uint, count int) error {
 	return s.db.Model(&ScanTask{}).Where("id = ?", id).Update("ip_count", count).Error
+}
+
+func (s *Store) SetTaskWorkersCount(id uint, count int) error {
+	return s.db.Model(&ScanTask{}).Where("id = ?", id).Update("workers_count", count).Error
+}
+
+// RetryTask resets a failed/cancelled task to pending status and updates its creation time.
+func (s *Store) RetryTask(id uint) error {
+	return s.db.Model(&ScanTask{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"status":       "pending",
+		"progress":     0,
+		"created_at":   time.Now(),
+		"completed_at": nil,
+	}).Error
 }
 
 // DeleteTask removes a task record only if it is not currently running.
@@ -364,6 +389,7 @@ func (s *Store) MarkTaskRunning(id uint) error {
 func (s *Store) UpdateTaskProgress(id uint, status string, progress int) error {
 	var task ScanTask
 	if err := s.db.First(&task, id).Error; err != nil {
+		log.Errorf("[Store] UpdateTaskProgress failed: Task %d not found: %v", id, err)
 		return err
 	}
 	// Don't downgrade status if it's already finished
@@ -379,5 +405,9 @@ func (s *Store) UpdateTaskProgress(id uint, status string, progress int) error {
 		now := time.Now()
 		updates["completed_at"] = &now
 	}
-	return s.db.Model(&task).Updates(updates).Error
+	if err := s.db.Model(&task).Updates(updates).Error; err != nil {
+		log.Errorf("[Store] Failed to save task progress (Task %d): %v", id, err)
+		return err
+	}
+	return nil
 }

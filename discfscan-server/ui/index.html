@@ -299,6 +299,13 @@
                             class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400">
                         <p class="text-xs text-slate-500 mt-2">Set <code class="text-purple-400">REDIS_HOST</code>, <code class="text-purple-400">REDIS_PORT</code>, <code class="text-purple-400">REDIS_PASS</code> as GitHub Secrets in your repo — workers will read them from env vars.</p>
                     </div>
+
+                    <div class="mt-6 pt-6 border-t border-white/5">
+                        <label class="block text-sm font-medium text-slate-300 mb-1">Worker Batch Size (Max IPs per batch)</label>
+                        <input type="number" id="workerBatchSize" placeholder="100000" min="1000"
+                            class="w-full bg-slate-800/50 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400">
+                        <p class="text-xs text-slate-500 mt-2">Controls how many IPs a worker consumes in one scan iteration. Lower values improve progress granularity; higher values improve throughput.</p>
+                    </div>
                 </div>
 
                 <div class="glass rounded-2xl p-6 mt-6 shadow-xl border-t border-green-500/30">
@@ -640,6 +647,7 @@
                     $('redisHost').value = data.redis_host || '';
                     $('redisPort').value = data.redis_port || '';
                     $('redisPass').value = data.redis_pass || '';
+                    $('workerBatchSize').value = data.worker_batch_size || '100000';
                     $('defaultPorts').value = data.default_ports || '443,2053,2083,2087,2096,8443';
                     $('defaultSpeedtest').checked = (data.default_speedtest === 'true');
                 } catch (e) { }
@@ -654,6 +662,7 @@
                             redis_host: $('redisHost').value,
                             redis_port: $('redisPort').value,
                             redis_pass: $('redisPass').value,
+                            worker_batch_size: $('workerBatchSize').value,
                             default_ports: $('defaultPorts').value,
                             default_speedtest: $('defaultSpeedtest').checked ? 'true' : 'false'
                         });
@@ -758,16 +767,21 @@
                                 ${t.ip_count > 0 ? t.ip_count.toLocaleString() : (t.status === 'pending' ? '...' : '-')}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400 max-w-xs truncate" title="${t.target}">${t.target}</td>
-                            <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400 font-mono">${t.workers || '-'}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400 font-mono">${t.workers_count > 0 ? t.workers_count : (t.status === 'pending' ? '...' : '-')}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400">${new Date(t.created_at).toLocaleString()}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-xs text-slate-400">${t.completed_at ? new Date(t.completed_at).toLocaleString() : '-'}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-right space-x-2">
                                 ${t.status === 'pending' ? `
-                                    <button class="p-1.5 text-slate-400 hover:text-cyan-400 title="Promote to Top" onclick="taskAction(${t.id}, 'promote')">
+                                    <button class="p-1.5 text-slate-400 hover:text-cyan-400" title="Promote to Top" onclick="taskAction(${t.id}, 'promote')">
                                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
                                     </button>
                                     <button class="p-1.5 text-slate-400 hover:text-orange-400" title="Cancel Task" onclick="taskAction(${t.id}, 'cancel')">
                                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                    </button>
+                                ` : ''}
+                                ${t.status === 'failed' || t.status === 'cancelled' ? `
+                                    <button class="p-1.5 text-slate-400 hover:text-indigo-400" title="Retry Task" onclick="taskAction(${t.id}, 'retry')">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
                                     </button>
                                 ` : ''}
                                 ${t.status === 'pending' || t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled' ? `

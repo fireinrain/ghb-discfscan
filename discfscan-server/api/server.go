@@ -17,6 +17,8 @@ import (
 
 	"discfscan-server/pkg"
 	"discfscan-server/tgbot"
+
+	"github.com/labstack/gommon/log"
 )
 
 type APIServer struct {
@@ -29,6 +31,10 @@ type APIServer struct {
 
 func NewAPIServer(store *pkg.Store, dispatcher *pkg.GitHubDispatcher, tgManager *tgbot.TGBotManager) *APIServer {
 	e := echo.New()
+
+	// Debug & Logging
+	e.Debug = true
+	e.Logger.SetLevel(log.DEBUG)
 
 	// Middleware
 	e.Use(middleware.Logger())
@@ -134,6 +140,7 @@ func (s *APIServer) setupRoutes() {
 	taskGrp.DELETE("/:id", s.handleDeleteTask)
 	taskGrp.POST("/:id/cancel", s.handleCancelTask)
 	taskGrp.POST("/:id/promote", s.handlePromoteTask)
+	taskGrp.POST("/:id/retry", s.handleRetryTask)
 }
 
 // StartDispatcher launches a background goroutine that dispatches the next pending task
@@ -142,6 +149,17 @@ func (s *APIServer) StartDispatcher() {
 	go func() {
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
+
+		// Initial sync of config to Redis
+		rdb, err := s.dispatcher.NewRedisClient()
+		if err == nil {
+			val := s.store.GetConfig("worker_batch_size")
+			if val == "" {
+				val = "100000"
+			}
+			rdb.Set(context.Background(), "config:worker_batch_size", val, 0)
+		}
+
 		for range ticker.C {
 			s.tryDispatchNext()
 			s.checkAndRescueStalledTasks()
@@ -167,8 +185,11 @@ func (s *APIServer) updateRunningTaskProgress() {
 	// Update task in database
 	err := s.store.UpdateTaskProgress(task.ID, status, progress)
 	if err == nil && status == "completed" {
-		fmt.Printf("[Dispatcher] Task %d completed autonomously. Triggering next.\n", task.ID)
+		log.Infof("[Dispatcher] Task %d completed autonomously. Cleaning up Redis and triggering next.", task.ID)
+		s.cleanupTaskRedis(task.ID)
 		go s.tryDispatchNext()
+	} else if err != nil {
+		log.Errorf("[Dispatcher] Background progress update failed for task %d: %v", task.ID, err)
 	}
 }
 
@@ -185,8 +206,9 @@ func (s *APIServer) checkAndRescueStalledTasks() {
 	}
 
 	// 2. Redis Check: Which workers are actually dead?
-	rdb, err := s.dispatcher.NewRedisClient() // Need a public method or internal access
+	rdb, err := s.dispatcher.NewRedisClient()
 	if err != nil {
+		log.Errorf("[Dispatcher] Redis connection failed in rescue loop: %v", err)
 		return
 	}
 
@@ -218,8 +240,10 @@ func (s *APIServer) checkAndRescueStalledTasks() {
 
 	if len(rescueWorkerIDs) > 0 {
 		workersStr := "[" + strings.Join(rescueWorkerIDs, ",") + "]"
-		fmt.Printf("[Dispatcher] Rescuing task %d, re-triggering workers: %s\n", task.ID, workersStr)
-		s.dispatcher.TriggerAction(task.TaskType, task.Target, task.Port, task.Speedtest, workersStr, task.ID)
+		log.Infof("[Dispatcher] Rescuing task %d, re-triggering workers: %s", task.ID, workersStr)
+		if err := s.dispatcher.TriggerAction(task.TaskType, task.Target, task.Port, task.Speedtest, workersStr, task.ID); err != nil {
+			log.Errorf("[Dispatcher] Rescue trigger failed for task %d: %v", task.ID, err)
+		}
 	}
 }
 
@@ -232,11 +256,13 @@ func (s *APIServer) tryDispatchNext() {
 		return
 	}
 	if err := s.store.MarkTaskRunning(task.ID); err != nil {
+		log.Errorf("[Dispatcher] Failed to mark task %d as running: %v", task.ID, err)
 		return
 	}
 	err := s.dispatcher.TriggerAction(task.TaskType, task.Target, task.Port, task.Speedtest, task.Workers, task.ID)
 	if err != nil {
 		// Mark as failed so queue doesn't stall
+		log.Errorf("[Dispatcher] Failed to trigger task %d: %v", task.ID, err)
 		_ = s.store.UpdateTaskProgress(task.ID, "failed", 0)
 	}
 }
@@ -324,8 +350,24 @@ func (s *APIServer) handleTriggerScan(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Target is required"})
 	}
 
+	// Pre-calculate IP and Worker Counts
+	targets, _ := pkg.ParseCIDRList(req.Target)
+	ipCount := pkg.CountTotalIPs(targets)
+
+	defaultMaxStr := s.store.GetConfig("github_workers")
+	defaultMax := 10
+	if n, err := strconv.Atoi(defaultMaxStr); err == nil && n > 0 {
+		defaultMax = n
+	}
+	workerCount := pkg.DecideWorkerCount(ipCount, defaultMax)
+	if req.Workers != "" {
+		if n, err := strconv.Atoi(req.Workers); err == nil && n > 0 {
+			workerCount = n
+		}
+	}
+
 	// Queue the task instead of triggering immediately
-	task, err := s.store.CreateTask(req.Label, req.Description, req.TaskType, req.Target, req.Port, req.Speedtest, req.Workers)
+	task, err := s.store.CreateTask(req.Label, req.Description, req.TaskType, req.Target, req.Port, req.Speedtest, req.Workers, ipCount, workerCount)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -398,6 +440,12 @@ func (s *APIServer) handleGetConfig(c echo.Context) error {
 		"redis_host":     s.store.GetConfig("redis_host"),
 		"redis_port":     s.store.GetConfig("redis_port"),
 		"redis_pass":     s.store.GetConfig("redis_pass"),
+		"worker_batch_size": func() string {
+			if v := s.store.GetConfig("worker_batch_size"); v != "" {
+				return v
+			}
+			return "100000"
+		}(),
 		"default_ports": func() string {
 			if v := s.store.GetConfig("default_ports"); v != "" {
 				return v
@@ -438,6 +486,14 @@ func (s *APIServer) handleSetConfig(c echo.Context) error {
 	}
 	if val, ok := req["redis_pass"]; ok {
 		s.store.SetConfig("redis_pass", val)
+	}
+	if val, ok := req["worker_batch_size"]; ok {
+		s.store.SetConfig("worker_batch_size", val)
+		// Sync to Redis immediately
+		rdb, err := s.dispatcher.NewRedisClient()
+		if err == nil {
+			rdb.Set(context.Background(), "config:worker_batch_size", val, 0)
+		}
 	}
 	if val, ok := req["default_ports"]; ok {
 		s.store.SetConfig("default_ports", val)
@@ -581,7 +637,23 @@ func (s *APIServer) handleCreateTask(c echo.Context) error {
 	if req.TaskType == "" {
 		req.TaskType = "scan"
 	}
-	task, err := s.store.CreateTask(req.Label, req.Description, req.TaskType, req.Target, req.Port, req.Speedtest, req.Workers)
+	// Pre-calculate IP and Worker Counts
+	targets, _ := pkg.ParseCIDRList(req.Target)
+	ipCount := pkg.CountTotalIPs(targets)
+
+	defaultMaxStr := s.store.GetConfig("github_workers")
+	defaultMax := 10
+	if n, err := strconv.Atoi(defaultMaxStr); err == nil && n > 0 {
+		defaultMax = n
+	}
+	workerCount := pkg.DecideWorkerCount(ipCount, defaultMax)
+	if req.Workers != "" {
+		if n, err := strconv.Atoi(req.Workers); err == nil && n > 0 {
+			workerCount = n
+		}
+	}
+
+	task, err := s.store.CreateTask(req.Label, req.Description, req.TaskType, req.Target, req.Port, req.Speedtest, req.Workers, ipCount, workerCount)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -593,6 +665,11 @@ func (s *APIServer) handleCreateTask(c echo.Context) error {
 func (s *APIServer) handleDeleteTask(c echo.Context) error {
 	var idUint uint
 	fmt.Sscanf(c.Param("id"), "%d", &idUint)
+
+	// 1. Redis Cleanup
+	s.cleanupTaskRedis(idUint)
+
+	// 2. DB Delete
 	if err := s.store.DeleteTask(idUint); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
@@ -605,6 +682,7 @@ func (s *APIServer) handleCancelTask(c echo.Context) error {
 	if err := s.store.CancelTask(idUint); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
+	s.cleanupTaskRedis(idUint)
 	return c.JSON(http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
@@ -615,6 +693,24 @@ func (s *APIServer) handlePromoteTask(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "promoted"})
+}
+
+func (s *APIServer) handleRetryTask(c echo.Context) error {
+	var idUint uint
+	fmt.Sscanf(c.Param("id"), "%d", &idUint)
+
+	// 1. Redis Cleanup
+	s.cleanupTaskRedis(idUint)
+
+	// 2. DB Update
+	if err := s.store.RetryTask(idUint); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	// 3. Trigger Dispatcher
+	go s.tryDispatchNext()
+
+	return c.JSON(http.StatusOK, map[string]string{"status": "retrying"})
 }
 
 func (s *APIServer) calculateTaskProgress(taskID uint) int {
@@ -644,4 +740,19 @@ func (s *APIServer) calculateTaskProgress(taskID uint) int {
 		progress = 100
 	}
 	return progress
+}
+
+func (s *APIServer) cleanupTaskRedis(taskID uint) {
+	rdb, err := s.dispatcher.NewRedisClient()
+	if err != nil {
+		return
+	}
+	ctx := context.Background()
+	// Cleanup all worker-related keys for this task
+	keys, _ := rdb.Keys(ctx, fmt.Sprintf("task:worker:%d:*", taskID)).Result()
+	if len(keys) > 0 {
+		rdb.Del(ctx, keys...)
+	}
+	rdb.Del(ctx, fmt.Sprintf("task:total_chunks:%d", taskID))
+	log.Infof("[Dispatcher] Redis resources cleaned up for task %d", taskID)
 }
